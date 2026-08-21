@@ -59,7 +59,11 @@ jobs:
           NEXT: ${{ steps.ver.outputs.next }}
         run: |
           set -euo pipefail
-          [ -f consumers.txt ] || { echo "no consumers.txt; nothing to do"; exit 0; }
+          # Consumer registry lives in the DSH_BOT_CONSUMERS repo variable
+          # (comma/space/newline separated owner/repo entries) — not in the
+          # tree, so this public repo never names private repos.
+          CONSUMERS="$(printf '%s' "${{ vars.DSH_BOT_CONSUMERS }}" | tr ',[:space:]' '\n')"
+          [ -n "$CONSUMERS" ] || { echo "no consumers registered; nothing to do"; exit 0; }
           while read -r repo; do
             [ -n "$repo" ] || continue
             case "$repo" in \#*) continue;; esac

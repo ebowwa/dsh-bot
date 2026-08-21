@@ -85,6 +85,9 @@ in your output — assume anything you write may become public."
 fi
 
 export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+# Hostnames the scrubber redacts on output surfaces beyond the generic
+# patterns; supplied by the consumer's (private) workflow config.
+export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
 export DSH_PERMISSION_MODE="${DSH_PERMISSION_MODE:-danger-full-access}"
 DSH_VERSION="${DSH_VERSION:-0.1.0-rc.7}"
 

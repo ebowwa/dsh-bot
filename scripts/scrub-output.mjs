@@ -51,7 +51,15 @@ rules.push(
   // ---- identifying metadata: output surfaces only ----
   [/\b\d{1,3}(?:\.\d{1,3}){3}\b/g, "[redacted:ip]", "meta"], // public or private
   [/\b[\w-]+\.local\b/g, "[redacted:host]", "meta"],
-  [/\b(?:m1mini16gb|seed-node-prod[\w-]*)\b/g, "[redacted:host]", "meta"],
+  // Extra hostnames to redact come from the CONSUMER (private repo) via env,
+  // so this shared (public-safe) file never names real machines:
+  //   DSH_SCRUB_EXTRA_HOSTS="host1,host2" (comma-separated)
+  ...(() => {
+    const raw = process.env.DSH_SCRUB_EXTRA_HOSTS ?? "";
+    const hosts = raw.split(",").map(h => h.trim()).filter(h => h.length > 2);
+    if (hosts.length === 0) return [];
+    return [[new RegExp(`\\b(?:${hosts.map(escapeRe).join("|")})\\b`, "g"), "[redacted:host]", "meta"]];
+  })(),
   [/(?:^|(?<=[\s"'=(<`]))\/(?:Users|home|root)\/[^\s"',)<>`]+/g, "[redacted:path]", "meta"],
   // Dates — meta tier: redacted on output surfaces (timestamps can correlate
   // runs to a person's working hours); KEPT in model input (tasks legitimately
