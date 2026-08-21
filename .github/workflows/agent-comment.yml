@@ -186,13 +186,14 @@ jobs:
             fi
           done
 
-          DIRTY="$(git status --porcelain 2>/dev/null)"
+          # .dsh-bot is the fetched toolkit checkout, NOT agent work
+          DIRTY="$(git status --porcelain -- . ':!.dsh-bot' 2>/dev/null)"
           AHEAD="$(git log --oneline "$BEFORE_SHA..HEAD" 2>/dev/null | wc -l | tr -d ' ')"
           if [ -n "$DIRTY" ] || [ "$AHEAD" -gt 0 ] 2>/dev/null; then
             BRANCH="dsh/auto-r${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
             git checkout -B "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
             if [ -n "$DIRTY" ]; then
-              git add -A
+              git add -A -- . ':!.dsh-bot' 
               git commit -m "dsh: automated ship of agent run ${GITHUB_RUN_ID}" --allow-empty 2>/dev/null || true
             fi
             if git push -u origin "$BRANCH" 2>&1; then
