@@ -67,6 +67,7 @@ jobs:
           repository: ebowwa/dsh-bot
           ref: ${{ inputs.dsh-bot-ref || github.ref }}
           path: .dsh-bot
+          token: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
         # The reusable workflow's own repo is not auto-checked-out.
 
       - name: Run agent, ship, dispatch review

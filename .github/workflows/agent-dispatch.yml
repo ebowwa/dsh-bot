@@ -47,6 +47,7 @@ jobs:
           repository: ebowwa/dsh-bot
           ref: ${{ inputs.dsh-bot-ref || github.ref }}
           path: .dsh-bot
+          token: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
 
       - name: Run agent
         env:
