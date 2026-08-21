@@ -62,7 +62,7 @@ jobs:
           TARGET_NUM: ${{ github.event.pull_request.number || github.event.issue.number }}
         run: |
           set -uo pipefail
-          ACK_BODY="**dsh agent (GLM-5.3))** — run: ${GITHUB_RUN_ID} — lane: ${RUNNER_NAME:-pending}
+          ACK_BODY="**dsh agent (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${RUNNER_NAME:-pending}
 
           :hourglass_flowing_sand: Started — working on it. Live trace: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
