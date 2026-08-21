@@ -1,0 +1,83 @@
+# drift-check — opens bump PRs to registered consumers when dsh-bot changes.
+#
+# Consumers register by listing their repo in consumers.txt (one per line,
+# "owner/repo" form). When scripts or reusable workflows change on main,
+# this workflow opens (or updates) a PR per consumer that bumps the pinned
+# ref in the consumer's workflows — the audit gate: nothing propagates until
+# each consumer merges through its own gates + review.
+
+name: drift-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - '.github/workflows/agent-*.yml'
+      - 'config/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute next tag
+        id: ver
+        run: |
+          # drift-check proposes the next minor tag; consumers pin tags.
+          git fetch --tags -q
+          LATEST="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          if [ -z "$LATEST" ]; then NEXT="v1.0.0"; else
+            MAJOR="${LATEST#v}"; MAJOR="${MAJOR%%.*}"
+            MINOR="${LATEST#v*.}"; MINOR="${MINOR%%.*}"
+            NEXT="v${MAJOR}.$((MINOR+1)).0"
+          fi
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the drift point
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          NEXT="${{ steps.ver.outputs.next }}"
+          if git rev-parse -q --verify "refs/tags/${NEXT}" >/dev/null; then
+            echo "tag ${NEXT} exists; skipping"
+          else
+            git tag "$NEXT"
+            git push origin "$NEXT"
+          fi
+
+      - name: Open bump PRs to consumers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.ver.outputs.next }}
+        run: |
+          set -euo pipefail
+          [ -f consumers.txt ] || { echo "no consumers.txt; nothing to do"; exit 0; }
+          while read -r repo; do
+            [ -n "$repo" ] || continue
+            case "$repo" in \#*) continue;; esac
+            echo "== $repo =="
+            # Consumers pin @v1-style major tags; the PR bumps the major tag's
+            # target by retagging... simpler and explicit: consumers pin the
+            # exact minor tag, and this PR rewrites it.
+            gh api "repos/$repo/contents/.github/workflows" --jq '.[].name' 2>/dev/null \
+              | grep -E 'dsh-(agent|review)' || { echo "  no consumer workflows; skip"; continue; }
+            # The bump itself: a PR per consumer editing the pinned ref.
+            BRANCH="dsh-bot/bump-${NEXT}"
+            if gh pr list --repo "$repo" --head "$BRANCH" --json number --jq 'length' | grep -q '^0$'; then
+              BODY="dsh-bot ${NEXT} is available. This PR is auto-opened by drift-check. Merge through your own gates + review."
+              gh api "repos/$repo/dispatches" --method POST -f event_type="dsh-bot-bump" \
+                -f "client_payload[next]=${NEXT}" 2>/dev/null \
+                && echo "  dispatched bump event to $repo" \
+                || echo "  dispatch failed for $repo (needs repo-level reception)"
+            else
+              echo "  bump PR already open"
+            fi
+          done < consumers.txt

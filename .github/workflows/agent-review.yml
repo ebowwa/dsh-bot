@@ -1,0 +1,148 @@
+# dsh-bot: agent-review — the adversarial review stage as a REUSABLE workflow.
+# The consumer keeps a thin shell (on: workflow_dispatch + issue_comment
+# /review, the trust gate); this holds the whole review job.
+#
+# Runs in the CALLER's context (caller's runners, GITHUB_TOKEN, secrets).
+#
+# Inputs:
+#   rules-file   repo-relative path of the review rules doc. Default REVIEW.md
+#   timeout-minutes  default 45
+
+name: agent-review
+
+on:
+  workflow_call:
+    inputs:
+      rules-file:
+        description: "Review rules document the reviewer must ground itself in"
+        type: string
+        default: "REVIEW.md"
+      timeout-minutes:
+        description: "Per-review cap in minutes"
+        type: number
+        default: 45
+      dsh-bot-ref:
+        description: "Git ref of ebowwa/dsh-bot to fetch scripts from"
+        type: string
+        default: ""
+      pr:
+        description: "PR number to review (workflow_dispatch callers pass this)"
+        type: string
+        default: ""
+
+jobs:
+  dsh-review:
+    runs-on: [self-hosted, dsh]
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Resolve PR number
+        id: pr
+        env:
+          EVENT_PATH: ${{ github.event_path }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "number=${{ inputs.pr }}" >> "$GITHUB_OUTPUT"
+          else
+            N="$(node -e '
+              const e = JSON.parse(require("fs").readFileSync(process.env.EVENT_PATH, "utf8"));
+              const m = (e.comment?.body ?? "").match(/^\/review[[:space:]]*#?(\d+)/);
+              process.stdout.write(m ? m[1] : String(e.issue?.number ?? ""));
+            ')"
+            echo "number=$N" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout the PR merge ref
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/merge
+          fetch-depth: 0
+
+      - name: Fetch dsh-bot scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ebowwa/dsh-bot
+          ref: ${{ inputs.dsh-bot-ref || github.ref }}
+          path: .dsh-bot
+
+      - name: Review the PR (rules + gates + verdict)
+        env:
+          DOPPLER_SERVICE_TOKEN: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.pr.outputs.number }}
+          RULES_FILE: ${{ inputs.rules-file }}
+          DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
+        run: |
+          set -euo pipefail
+          MASK_PROBE="DSH-REVIEW-MASK-9c2b"
+          echo "::add-mask::${MASK_PROBE}"
+          command -v doppler >/dev/null 2>&1 \
+            && doppler run --token "$DOPPLER_SERVICE_TOKEN" -- \
+                 sh -c 'printf "::add-mask::%s\n" "$ZAI_API_KEY"' || true
+
+          cat > "$RUNNER_TEMP/review-task.txt" <<'TASKEOF' 
+          You are the REVIEW stage of this repo's agent loop. Your job is to
+          find what the author missed — assume the PR is guilty. You are
+          reviewing a change by an agent like you with no sunk cost: be
+          adversarial and specific.
+
+          PR number: __PR__
+          Ground truth, read both first:
+            - ${RULES_FILE}  (the review rules; every finding cites a rule)
+            - CLAUDE.md  (the architecture contract; skip silently if absent)
+
+          Method, in order:
+          1. gh pr view __PR__ --json title,body,files — read the claims.
+          2. git diff origin/main...HEAD — read the whole diff.
+          3. Open every changed file in full; read surrounding context.
+          4. Run the gates yourself if the repo has them (typecheck/test/arch
+             or equivalents; discover from package.json). Record results.
+          5. Check tests actually cover the behavior change.
+          6. Check the PR description against reality — overstatement is a
+             blocking defect, same as a bug.
+
+          Verdict — submit exactly one GitHub review and nothing else:
+            gh pr review __PR__ --request-changes --body-file <file>
+          or, only if you found nothing blocking:
+            gh pr review __PR__ --approve --body-file <file>
+          (A bot cannot approve its own PR — if the API rejects approve with
+          "can not approve your own pull request", resubmit the same body as
+          --comment and say so at the top.)
+
+          Review body format (markdown):
+            ## Verdict: APPROVE or REQUEST CHANGES
+            ## Gates (each: pass/fail, with the failing bits)
+            ## Findings (numbered; each cites the rule; file:line and a
+               concrete suggested fix; severity: blocking/minor)
+            ## Description accuracy (claims vs reality)
+
+          Then set exactly one label:
+            gh pr edit __PR__ --add-label ai-reviewed        (approve)
+            gh pr edit __PR__ --add-label changes-requested  (request changes)
+          (Remove the other label if present: --remove-label.)
+
+          Rules for yourself: do NOT merge, do NOT push, do NOT comment on
+          the thread (the review IS the output). Never print secrets, IPs,
+          or absolute runner paths. Finish with a one-paragraph summary.
+          TASKEOF
+          TASK="$(sed "s/__PR__/$PR/g" "$RUNNER_TEMP/review-task.txt")"
+
+          export REPLY_TARGET=""   # review mode: no thread reply, no shipping
+          bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$TASK" \
+            | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" \
+            | tee "$RUNNER_TEMP/dsh-review-output.txt"
+
+      - name: Relay review summary to the thread
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.pr.outputs.number }}
+          DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
+        run: |
+          set -euo pipefail
+          {
+            echo "**dsh review (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${RUNNER_NAME:-unknown}"
+            echo
+            node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$RUNNER_TEMP/dsh-review-output.txt" 2>/dev/null \
+              || echo "_(review output withheld: scrubber unavailable)_"
+          } > "$RUNNER_TEMP/dsh-review-reply.md"
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/dsh-review-reply.md"

@@ -1,0 +1,36 @@
+# DSH settings for the GLM CI bot.
+# Copied to $DSH_HOME/settings.yaml on first run by run-dsh-agent.sh.
+#
+# llm-pi-ai: provider routes for the pi-ai multi-provider adapter. The `zai`
+# route is hand-declared (pi-ai ships nothing under this key): OpenAI-compatible
+# wire protocol against Z.AI's coding PAAS endpoint. apiKeyEnv is a credential
+# *reference* — ZAI_API_KEY must exist in the process env (Doppler injects it);
+# no secret lives in this file.
+#
+# agent-default-model: the model every headless Agent is created with. The
+# headless runner reads ctx.agentDefaultModel at creation time.
+
+agent-default-model:
+  provider: zai
+  model: glm-5.3
+
+llm-pi-ai:
+  providers:
+    zai:
+      displayName: Z.AI Coding Plan
+      apiKeyEnv: ZAI_API_KEY
+      api: openai-completions
+      baseURL: https://api.z.ai/api/coding/paas/v4
+      models:
+        - id: glm-5.3
+          name: GLM-5.3
+          contextWindow: 1000000
+          maxTokens: 131072
+        - id: glm-5.2
+          name: GLM-5.2
+          contextWindow: 1000000
+          maxTokens: 131072
+        - id: glm-4.7
+          name: GLM-4.7
+          contextWindow: 200000
+          maxTokens: 65536

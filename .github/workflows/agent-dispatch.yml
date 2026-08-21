@@ -1,0 +1,65 @@
+# dsh-bot: agent-dispatch — manual/scheduled task entry as a REUSABLE workflow.
+
+name: agent-dispatch
+
+on:
+  workflow_call:
+    inputs:
+      task:
+        description: "Task text (empty = caller supplies DEFAULT_TASK env)"
+        type: string
+        default: ""
+      base-ref:
+        description: "Ref to start from"
+        type: string
+        default: ""
+      runner:
+        description: "Lane: auto | big | mac | linux"
+        type: string
+        default: "auto"
+      timeout-minutes:
+        type: number
+        default: 120
+      review-workflow:
+        type: string
+        default: "dsh-review.yml"
+      dsh-bot-ref:
+        type: string
+        default: ""
+
+jobs:
+  dsh-agent:
+    runs-on: >-
+      ${{ inputs.runner == 'big' && fromJSON('["self-hosted","dsh","big"]')
+      || inputs.runner == 'mac' && fromJSON('["self-hosted","dsh","macOS"]')
+      || inputs.runner == 'linux' && fromJSON('["self-hosted","dsh","Linux"]')
+      || fromJSON('["self-hosted","dsh"]') }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base-ref || github.ref }}
+
+      - name: Fetch dsh-bot scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ebowwa/dsh-bot
+          ref: ${{ inputs.dsh-bot-ref || github.ref }}
+          path: .dsh-bot
+
+      - name: Run agent
+        env:
+          DOPPLER_SERVICE_TOKEN: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          TASK_INPUT: ""
+          DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
+        run: |
+          set -euo pipefail
+          echo "DSH_RUNNER_NAME=${RUNNER_NAME:-unknown}" >> "$GITHUB_ENV"
+          TASK="${{ inputs.task }}"
+          [ -n "$TASK" ] || TASK="${DEFAULT_TASK:?no task given}"
+          export REPLY_TARGET=""
+          bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$TASK" \
+            | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" \
+            | tee "$RUNNER_TEMP/dsh-agent-output.txt"

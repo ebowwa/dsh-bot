@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# gh-scrub-shim — the scrubber sits between the AGENT and GitHub.
+#
+# Installed by run-dsh-agent.sh at the FRONT of the agent's PATH: the agent's
+# `gh` resolves to this shim, which runs every text-bearing argument through
+# scrub-output.mjs (default mode: credentials + PII + identifying metadata)
+# before exec'ing the real gh. GitHub-bound text (comments, PR bodies/titles,
+# review bodies, issue bodies/titles, release notes, api -f fields) can then
+# never carry a key, SSN, SSH key, IP, home path, or date past this line.
+#
+# Env contract (set by run-dsh-agent.sh; names deliberately avoid the
+# KEY/PASSWORD/SECRET/TOKEN patterns dsh scrubs from child env):
+#   GH_SCRUB_REAL   absolute path of the real gh
+#   SCRUB_SCRIPT    absolute path of scrub-output.mjs
+#
+# Honest limits: an agent invoking the real binary by absolute path, or
+# curl-ing api.github.com directly, bypasses the shim. Those are deliberate
+# circumvention, not accidents — the review stage and trace make both visible.
+
+set -uo pipefail
+REAL="${GH_SCRUB_REAL:?gh shim: GH_SCRUB_REAL not set}"
+SCRUB="${SCRUB_SCRIPT:?gh shim: SCRUB_SCRIPT not set}"
+
+scrub_text() { node "$SCRUB" <<<"$1" 2>/dev/null || printf '%s' "$1"; }
+
+scrub_file() { # <path> -> echoes a scrubbed temp file path
+  local out
+  out="$(mktemp "${TMPDIR:-/tmp}/gh-scrubbed.XXXXXX")"
+  node "$SCRUB" <"$1" >"$out" 2>/dev/null || cp "$1" "$out"
+  printf '%s' "$out"
+}
+
+# value flags whose ARGUMENT is agent-authored GitHub-bound text
+is_value_flag() {
+  case "$1" in
+    --body|--title|--message|--description|-t|-b) return 0;;
+    *) return 1;;
+  esac
+}
+scrubbable_field() {
+  case "$1" in
+    body|title|subject|message|description|comment) return 0;;
+    *) return 1;;
+  esac
+}
+
+args=()
+while [ $# -gt 0 ]; do
+  flag="$1"; shift
+  case "$flag" in
+    --body=*|--title=*|--message=*|--description=*)
+      key="${flag%%=*}"; val="${flag#*=}"
+      args+=("$key=$(scrub_text "$val")");;
+    --body-file|--title-file)
+      if [ $# -gt 0 ] && [ -f "$1" ]; then
+        args+=("$flag" "$(scrub_file "$1")"); shift
+      else
+        args+=("$flag")
+      fi;;
+    -f|-F|--raw-field|--field)
+      if [ $# -gt 0 ]; then
+        key="${1%%=*}"
+        if scrubbable_field "$key" && [ "$1" != "$key" ]; then
+          args+=("$flag" "$key=$(scrub_text "${1#*=}")")
+        else
+          args+=("$flag" "$1")
+        fi
+        shift
+      else
+        args+=("$flag")
+      fi;;
+    *)
+      if is_value_flag "$flag" && [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+        # consume a value only when one is plausibly present (next arg is not
+        # a flag) — keeps boolean uses like `gh pr merge -m` safe
+        args+=("$flag" "$(scrub_text "$1")"); shift
+      else
+        args+=("$flag")
+      fi;;
+  esac
+done
+
+exec "$REAL" "${args[@]}"

@@ -1,0 +1,36 @@
+# Consumer shell — .github/workflows/dsh-review.yml in YOUR repo.
+
+name: dsh review
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to review"
+        required: true
+        type: string
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: dsh-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  dsh-review:
+    if: >-
+      (github.event_name == 'workflow_dispatch')
+      || (github.event_name == 'issue_comment'
+          && startsWith(github.event.comment.body, '/review')
+          && github.event.comment.user.type != 'Bot'
+          && contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+          && github.event.issue.pull_request)
+    uses: ebowwa/dsh-bot/.github/workflows/agent-review.yml@v1
+    secrets: inherit
+    with:
+      rules-file: "REVIEW.md"

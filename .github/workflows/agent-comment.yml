@@ -1,0 +1,246 @@
+# dsh-bot: agent-comment — the comment-triggered agent loop as a REUSABLE
+# workflow. Consumer repos call this with `uses:`; their local file is a
+# ~15-line event shell (on:, the trust gate, secrets: inherit).
+#
+# Runs in the CALLER's context: caller's runners, caller's GITHUB_TOKEN,
+# caller's secrets. dsh-bot itself needs no runners.
+#
+# Inputs (all optional — sane defaults):
+#   lanes          JSON-ish lane mapping hint. Default routes like the
+#                  tracker: --big→big lanes, --mac→macOS, --linux→Linux,
+#                  no hint→any idle dsh runner.
+#   review-workflow  Filename of the review workflow to auto-dispatch after
+#                  shipping. Default "dsh-review.yml". Empty string disables
+#                  review dispatch.
+#   timeout-minutes Per-run cap. Default 120.
+#
+# Required by the caller:
+#   secrets: DOPPLER_SERVICE_TOKEN (Z.AI key via Doppler)
+#   runners: labeled dsh (+big on heavy lanes)
+
+name: agent-comment
+
+on:
+  workflow_call:
+    inputs:
+      timeout-minutes:
+        description: "Per-run cap in minutes"
+        type: number
+        default: 120
+      review-workflow:
+        description: "Review workflow filename to dispatch after shipping (empty disables)"
+        type: string
+        default: "dsh-review.yml"
+      lanes-enabled:
+        description: "Enable --big/--mac/--linux lane routing from comment prefixes"
+        type: boolean
+        default: true
+      dsh-bot-ref:
+        description: "Git ref of ebowwa/dsh-bot to fetch scripts from (defaults to the called workflow's own pinned ref)"
+        type: string
+        default: ""
+
+jobs:
+  dsh-agent-comment:
+    runs-on: >-
+      ${{ inputs.lanes-enabled
+      && (startsWith(github.event.comment.body, '/dsh --big') || startsWith(github.event.comment.body, '@dsh-agent --big')) && fromJSON('["self-hosted","dsh","big"]')
+      || inputs.lanes-enabled
+      && (startsWith(github.event.comment.body, '/dsh --mac') || startsWith(github.event.comment.body, '@dsh-agent --mac')) && fromJSON('["self-hosted","dsh","macOS"]')
+      || inputs.lanes-enabled
+      && (startsWith(github.event.comment.body, '/dsh --linux') || startsWith(github.event.comment.body, '@dsh-agent --linux')) && fromJSON('["self-hosted","dsh","Linux"]')
+      || fromJSON('["self-hosted","dsh"]') }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Checkout the repo (caller's context)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.event.issue.pull_request && format('refs/pull/{0}/merge', github.event.issue.number) || '' }}
+
+      - name: Fetch dsh-bot scripts (pinned ref)
+        uses: actions/checkout@v4
+        with:
+          repository: ebowwa/dsh-bot
+          ref: ${{ inputs.dsh-bot-ref || github.ref }}
+          path: .dsh-bot
+        # The reusable workflow's own repo is not auto-checked-out.
+
+      - name: Run agent, ship, dispatch review
+        env:
+          DOPPLER_SERVICE_TOKEN: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          # (comment body + task come from GITHUB_EVENT_PATH on disk — the
+          # runner dumps step env: to the log, and user text is not a secret)
+          TARGET_KIND: ${{ (github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request) && 'pr' || 'issue' }}
+          TARGET_NUM: ${{ github.event.pull_request.number || github.event.issue.number }}
+          REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
+          DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
+        run: |
+          set -euo pipefail
+          echo "DSH_RUNNER_NAME=${RUNNER_NAME:-unknown}" >> "$GITHUB_ENV"
+
+          COMMENT_BODY="$(node -e '
+            const e = JSON.parse(require("fs").readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+            process.stdout.write(e.comment?.body ?? "");
+          ')"
+          TASK="${COMMENT_BODY#/dsh }"
+          TASK="${TASK#@dsh-agent }"
+          TASK="${TASK#@dsh-agent: }"
+          TASK="$(echo "$TASK" | sed -E 's/^--(big|mac|linux)([[:space:]]+|$)//' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [ -z "$TASK" ]; then
+            echo "Empty task after stripping the trigger; nothing to do." >&2
+            exit 0
+          fi
+
+          # Thread context: the issue/PR this comment belongs to.
+          {
+            gh issue view "$TARGET_NUM" --repo "$GITHUB_REPOSITORY" \
+              --json title,body \
+              --jq '"title: " + .title + "\nbody (truncated):\n" + ((.body // "")[0:1600])' || true
+            echo
+            echo "recent comments (last 8, truncated):"
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${TARGET_NUM}/comments?per_page=100" \
+              --jq '.[-8:][] | "- " + .user.login + ": " + ((.body // "") | gsub("[\\r\\n]+"; " ") | .[0:280])' || true
+          } > "$RUNNER_TEMP/dsh-thread-context.txt" 2>/dev/null || true
+          export THREAD_CONTEXT="$(cat "$RUNNER_TEMP/dsh-thread-context.txt" 2>/dev/null || true)"
+
+          export REPLY_TARGET="${TARGET_KIND} #${TARGET_NUM}"
+          export TARGET_KIND TARGET_NUM
+
+          git rev-parse HEAD > "$RUNNER_TEMP/dsh-before-sha"
+          git ls-remote origin 'refs/heads/dsh/*' 2>/dev/null | awk '{print $2}' \
+            | sed 's|refs/heads/||' | sort > "$RUNNER_TEMP/dsh-before-dsh-branches" || true
+          gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
+            --json number --jq '.[].number' | sort -n > "$RUNNER_TEMP/dsh-before-open-prs" || true
+          {
+            echo "DSH_TASK_TITLE<<DSHEOF"
+            echo "$TASK" | head -n1 | cut -c1-120 | iconv -f UTF-8 -t UTF-8 -c
+            echo ""
+            echo "DSHEOF"
+          } >> "$GITHUB_ENV"
+
+          # scrub BEFORE tee: the step's stdout IS the Actions log
+          bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$TASK" \
+            | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" \
+            | tee "$RUNNER_TEMP/dsh-agent-output.txt"
+
+      # Deterministic shipping (never trust the model to push)
+      - name: Ship any code changes as a PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
+          DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
+        run: |
+          set -uo pipefail
+          cd "$GITHUB_WORKSPACE"
+          NOTE=""
+          command -v git >/dev/null 2>&1 || { echo "no git; skip"; echo "" > "$RUNNER_TEMP/dsh-ship-note.txt"; exit 0; }
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          BEFORE_SHA="$(cat "$RUNNER_TEMP/dsh-before-sha" 2>/dev/null || git rev-parse HEAD)"
+          git fetch origin --prune --quiet 2>/dev/null || true
+
+          if [ -s "$RUNNER_TEMP/dsh-before-open-prs" ] && command -v gh >/dev/null 2>&1; then
+            while read -r N; do
+              ST="$(gh pr view "$N" --repo "$GITHUB_REPOSITORY" --json state --jq .state 2>/dev/null || true)"
+              case "$ST" in
+                MERGED) NOTE="${NOTE:+$NOTE; }merged #$N";;
+                CLOSED) NOTE="${NOTE:+$NOTE; }closed #$N";;
+              esac
+            done < "$RUNNER_TEMP/dsh-before-open-prs"
+          fi
+
+          git ls-remote origin 'refs/heads/dsh/*' 2>/dev/null | awk '{print $2}' \
+            | sed 's|refs/heads/||' | sort > "$RUNNER_TEMP/dsh-after-dsh-branches" || true
+          NEW_REMOTE="$(comm -13 "$RUNNER_TEMP/dsh-before-dsh-branches" "$RUNNER_TEMP/dsh-after-dsh-branches" 2>/dev/null || true)"
+          if [ -n "$NEW_REMOTE" ]; then
+            NOTE="agent pushed: $(echo "$NEW_REMOTE" | tr '\n' ' ')"
+          fi
+
+          for B in $(git for-each-ref refs/heads/dsh --format='%(refname:short)'); do
+            if ! grep -qx "$B" "$RUNNER_TEMP/dsh-after-dsh-branches" 2>/dev/null; then
+              if git push -u origin "$B" 2>&1; then
+                PR_OUT="$(gh pr create --repo "$GITHUB_REPOSITORY" --head "$B" \
+                  --title "dsh: ${DSH_TASK_TITLE:-$B}" \
+                  --body "Automated PR from agent run ${GITHUB_RUN_ID} (branch pushed by shipper)." 2>&1 || true)"
+                case "$PR_OUT" in https://*)
+                  NOTE="${NOTE:+$NOTE; }shipped [$B]($PR_OUT)"
+                  PR_NUM="$(gh pr view "$B" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)"
+                  if [ -n "$PR_NUM" ] && [ -n "$REVIEW_WORKFLOW" ]; then
+                    gh workflow run "$REVIEW_WORKFLOW" --repo "$GITHUB_REPOSITORY" -f pr="$PR_NUM" 2>/dev/null \
+                      && NOTE="$NOTE; review dispatched" \
+                      || echo "review dispatch failed for #$PR_NUM (run: gh workflow run $REVIEW_WORKFLOW -f pr=$PR_NUM)" >&2
+                  fi;;
+                  *)
+                  echo "gh pr create failed for $B: $PR_OUT" >&2
+                  NOTE="${NOTE:+$NOTE; }pushed $B (PR create failed: $(echo "$PR_OUT" | head -n1))";; esac
+              fi
+            fi
+          done
+
+          DIRTY="$(git status --porcelain 2>/dev/null)"
+          AHEAD="$(git log --oneline "$BEFORE_SHA..HEAD" 2>/dev/null | wc -l | tr -d ' ')"
+          if [ -n "$DIRTY" ] || [ "$AHEAD" -gt 0 ] 2>/dev/null; then
+            BRANCH="dsh/auto-r${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}"
+            git checkout -B "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
+            if [ -n "$DIRTY" ]; then
+              git add -A
+              git commit -m "dsh: automated ship of agent run ${GITHUB_RUN_ID}" --allow-empty 2>/dev/null || true
+            fi
+            if git push -u origin "$BRANCH" 2>&1; then
+              {
+                echo "Automated PR from **dsh agent (GLM-5.3)** run ${GITHUB_RUN_ID}."
+                echo
+                echo "**Task:** ${DSH_TASK_TITLE:-_(see run log)_}"
+                echo
+                echo "---"
+                echo
+                node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$RUNNER_TEMP/dsh-agent-output.txt" 2>/dev/null || true
+              } > "$RUNNER_TEMP/dsh-pr-body.md"
+              PR_OUT="$(gh pr create --repo "$GITHUB_REPOSITORY" --head "$BRANCH" \
+                --title "dsh: ${DSH_TASK_TITLE:-agent changes}" \
+                --body-file "$RUNNER_TEMP/dsh-pr-body.md" 2>&1 || true)"
+              case "$PR_OUT" in https://*)
+                NOTE="${NOTE:+$NOTE; }shipped [$BRANCH]($PR_OUT)"
+                PR_NUM="$(gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)"
+                if [ -n "$PR_NUM" ] && [ -n "$REVIEW_WORKFLOW" ]; then
+                  gh workflow run "$REVIEW_WORKFLOW" --repo "$GITHUB_REPOSITORY" -f pr="$PR_NUM" 2>/dev/null \
+                    && NOTE="$NOTE; review dispatched" \
+                    || echo "review dispatch failed for #$PR_NUM (run: gh workflow run $REVIEW_WORKFLOW -f pr=$PR_NUM)" >&2
+                fi;;
+                *)
+                echo "gh pr create failed for $BRANCH: $PR_OUT" >&2
+                NOTE="${NOTE:+$NOTE; }pushed $BRANCH (PR create failed: $(echo "$PR_OUT" | head -n1))";; esac
+            else
+              NOTE="${NOTE:+$NOTE; }WARNING: found changes but push failed"
+            fi
+          fi
+
+          echo "ship note: ${NOTE:-nothing to ship (verified: no repo-state changes, no local diff)}"
+          echo "$NOTE" > "$RUNNER_TEMP/dsh-ship-note.txt"
+
+      - name: Reply on the thread as github-actions[bot]
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_KIND: ${{ (github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request) && 'pr' || 'issue' }}
+          TARGET_NUM: ${{ github.event.pull_request.number || github.event.issue.number }}
+          DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
+        run: |
+          set -euo pipefail
+          {
+            echo "**dsh agent (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${DSH_RUNNER_NAME:-unknown}"
+            echo
+            node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$RUNNER_TEMP/dsh-agent-output.txt" 2>/dev/null \
+              || echo "_(agent output withheld: scrubber unavailable)_"
+            if [ -s "$RUNNER_TEMP/dsh-ship-note.txt" ]; then
+              echo
+              echo "**Shipped:** $(cat "$RUNNER_TEMP/dsh-ship-note.txt")"
+            fi
+          } > "$RUNNER_TEMP/dsh-reply.md"
+          if [ "$TARGET_KIND" = "pr" ]; then
+            gh pr comment "$TARGET_NUM" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/dsh-reply.md"
+          else
+            gh issue comment "$TARGET_NUM" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/dsh-reply.md"
+          fi

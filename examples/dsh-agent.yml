@@ -1,0 +1,39 @@
+# Consumer shell — .github/workflows/dsh-agent.yml in YOUR repo.
+
+name: dsh agent (GLM)
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task for the DSH headless agent"
+        required: true
+        type: string
+      base_branch:
+        description: "Branch the agent starts from"
+        required: false
+        default: main
+        type: string
+      runner:
+        description: "Runner lane"
+        required: false
+        default: auto
+        type: choice
+        options: [auto, big, mac, linux]
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  dsh-agent:
+    if: ${{ github.event_name != 'schedule' || true }}
+    uses: ebowwa/dsh-bot/.github/workflows/agent-dispatch.yml@v1
+    secrets: inherit
+    with:
+      task: ${{ inputs.task }}
+      base-ref: ${{ inputs.base_branch }}
+      runner: ${{ inputs.runner || 'auto' }}

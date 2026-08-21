@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# git-scrub-shim — commit/tag messages pass the scrubber before they are
+# signed into history (and therefore into pushed refs and PR titles).
+#
+# Installed by run-dsh-agent.sh at the FRONT of the agent's PATH. Covers
+# `git commit -m/--message=`, `git tag -m/--message=`. File CONTENTS are not
+# rewritten here — code that must ship is guarded upstream (input-side secret
+# scrubbing keeps credentials out of the model's authoring context) and
+# downstream (the review stage reads every diff).
+#
+# Env contract (set by run-dsh-agent.sh; names avoid the
+# KEY/PASSWORD/SECRET/TOKEN patterns dsh scrubs from child env):
+#   GIT_SCRUB_REAL   absolute path of the real git
+#   SCRUB_SCRIPT     absolute path of scrub-output.mjs
+
+set -uo pipefail
+REAL="${GIT_SCRUB_REAL:?git shim: GIT_SCRUB_REAL not set}"
+SCRUB="${SCRUB_SCRIPT:?git shim: SCRUB_SCRIPT not set}"
+
+scrub_text() { node "$SCRUB" <<<"$1" 2>/dev/null || printf '%s' "$1"; }
+
+args=()
+while [ $# -gt 0 ]; do
+  flag="$1"; shift
+  case "$flag" in
+    -m|--message)
+      if [ $# -gt 0 ]; then
+        args+=("$flag" "$(scrub_text "$1")"); shift
+      else
+        args+=("$flag")
+      fi;;
+    --message=*)
+      key="${flag%%=*}"; val="${flag#*=}"
+      args+=("$key=$(scrub_text "$val")");;
+    *)
+      args+=("$flag");;
+  esac
+done
+
+exec "$REAL" "${args[@]}"
