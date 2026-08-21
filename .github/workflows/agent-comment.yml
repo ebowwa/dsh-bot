@@ -55,6 +55,8 @@ jobs:
       && (startsWith(github.event.comment.body, '/dsh --linux') || startsWith(github.event.comment.body, '@dsh-agent --linux')) && fromJSON('["self-hosted","dsh","Linux"]')
       || fromJSON('["self-hosted","dsh"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
+    env:
+      DSH_BOT_TOKEN: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
     steps:
       - name: Checkout the repo (caller's context)
         uses: actions/checkout@v4
@@ -67,7 +69,7 @@ jobs:
           repository: ebowwa/dsh-bot
           ref: ${{ inputs.dsh-bot-ref || github.ref }}
           path: .dsh-bot
-          token: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
+          token: ${{ env.DSH_BOT_TOKEN }}
         # The reusable workflow's own repo is not auto-checked-out.
 
       - name: Run agent, ship, dispatch review
