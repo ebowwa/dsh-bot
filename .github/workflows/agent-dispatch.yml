@@ -35,8 +35,6 @@ jobs:
       || inputs.runner == 'linux' && fromJSON('["self-hosted","dsh","Linux"]')
       || fromJSON('["self-hosted","dsh"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    env:
-      DSH_BOT_TOKEN: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -49,7 +47,7 @@ jobs:
           repository: ebowwa/dsh-bot
           ref: ${{ inputs.dsh-bot-ref || github.ref }}
           path: .dsh-bot
-          token: ${{ env.DSH_BOT_TOKEN }}
+          token: ${{ secrets.DSH_BOT_REPO_TOKEN }}
 
       - name: Run agent
         env:

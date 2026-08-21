@@ -34,8 +34,6 @@ jobs:
   dsh-review:
     runs-on: [self-hosted, dsh]
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    env:
-      DSH_BOT_TOKEN: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
     steps:
       - name: Resolve PR number
         id: pr
@@ -65,7 +63,7 @@ jobs:
           repository: ebowwa/dsh-bot
           ref: ${{ inputs.dsh-bot-ref || github.ref }}
           path: .dsh-bot
-          token: ${{ env.DSH_BOT_TOKEN }}
+          token: ${{ secrets.DSH_BOT_REPO_TOKEN }}
 
       - name: Review the PR (rules + gates + verdict)
         env:
