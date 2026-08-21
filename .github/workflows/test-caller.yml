@@ -2,4 +2,7 @@ name: test-caller
 on: workflow_dispatch
 jobs:
   call:
-    uses: ./.github/workflows/canary.yml
+    uses: ./.github/workflows/agent-dispatch.yml@v1
+    secrets: inherit
+    with:
+      task: "reply with one word: same-repo-ok"
