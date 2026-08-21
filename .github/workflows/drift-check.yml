@@ -84,4 +84,4 @@ jobs:
             else
               echo "  bump PR already open"
             fi
-          done < consumers.txt
+          done <<< "$CONSUMERS"
