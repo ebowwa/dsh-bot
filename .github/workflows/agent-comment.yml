@@ -56,6 +56,20 @@ jobs:
       || fromJSON('["self-hosted","dsh"]') }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
+      - name: Ack the thread instantly (before any work)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_NUM: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -uo pipefail
+          ACK_BODY="**dsh agent (GLM-5.3))** — run: ${GITHUB_RUN_ID} — lane: ${RUNNER_NAME:-pending}
+
+          :hourglass_flowing_sand: Started — working on it. Live trace: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          _(this comment will be edited with the result — watch the trace meanwhile)_"
+          ID="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${TARGET_NUM}/comments"             -f body="$ACK_BODY" --jq .id 2>/dev/null || true)"
+          if [ -n "$ID" ]; then echo "ACK_COMMENT_ID=$ID" >> "$GITHUB_ENV"; fi
+
       - name: Checkout the repo (caller's context)
         uses: actions/checkout@v4
         with:
@@ -141,6 +155,14 @@ jobs:
         run: |
           set -uo pipefail
           cd "$GITHUB_WORKSPACE"
+          # progress edit: agent phase over, shipping
+          if [ -n "${ACK_COMMENT_ID:-}" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${ACK_COMMENT_ID}" -X PATCH               -f body="**dsh agent (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${DSH_RUNNER_NAME:-unknown}
+
+              :package: Agent finished — shipping any changes. Live trace: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+              _(this comment will be edited with the result)_" >/dev/null 2>&1 || true
+          fi
           NOTE=""
           command -v git >/dev/null 2>&1 || { echo "no git; skip"; echo "" > "$RUNNER_TEMP/dsh-ship-note.txt"; exit 0; }
           git config user.name  "github-actions[bot]"
@@ -248,7 +270,10 @@ jobs:
               echo "**Shipped:** $(cat "$RUNNER_TEMP/dsh-ship-note.txt")"
             fi
           } > "$RUNNER_TEMP/dsh-reply.md"
-          if [ "$TARGET_KIND" = "pr" ]; then
+          if [ -n "${ACK_COMMENT_ID:-}" ]; then
+            # edit the ack comment in place — one comment per task
+            gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${ACK_COMMENT_ID}" -X PATCH               -F body="@$RUNNER_TEMP/dsh-reply.md" >/dev/null
+          elif [ "$TARGET_KIND" = "pr" ]; then
             gh pr comment "$TARGET_NUM" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/dsh-reply.md"
           else
             gh issue comment "$TARGET_NUM" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/dsh-reply.md"
