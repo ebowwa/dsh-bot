@@ -84,7 +84,17 @@ SECURITY: never print API keys, tokens, internal IPs, or absolute home paths
 in your output — assume anything you write may become public."
 fi
 
-export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+# Per-job harness home by default: two runner lanes on one machine MUST NOT
+# share $DSH_HOME (settings regeneration on one lane would race an in-flight
+# job on the other), and a job-scoped home makes cleanup atomic (rm -rf).
+# Set DSH_PERSISTENT_HOME=1 to opt back into a shared home (then
+# DSH_KEEP_SESSIONS governs transcripts).
+if [ -n "${DSH_PERSISTENT_HOME:-}" ]; then
+  export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
+else
+  export DSH_HOME="${DSH_HOME:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dsh-home.$$}"
+  JOB_SCOPED_HOME=1
+fi
 # Hostnames the scrubber redacts on output surfaces beyond the generic
 # patterns; supplied by the consumer's (private) workflow config.
 export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
@@ -260,4 +270,12 @@ fi
 # stdout carries ONLY the agent's final answer (the comment workflow tees it).
 cat "$FINAL_OUT"
 rm -f "$FINAL_OUT" "$MARKER"
+
+# Atomic cleanup: a job-scoped home (transcripts, per-run settings, profile
+# symlinks) is deleted whole — nothing from this job survives on the runner
+# unless DSH_KEEP_SESSIONS=1 (transcripts kept for debugging) or the home is
+# persistent/shared (older path-based cleanup applies).
+if [ "${JOB_SCOPED_HOME:-0}" = "1" ] && [ "${DSH_KEEP_SESSIONS:-0}" != "1" ]; then
+  rm -rf "$DSH_HOME" 2>/dev/null || true
+fi
 exit "$RC"
