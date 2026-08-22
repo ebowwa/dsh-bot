@@ -7,8 +7,10 @@
 # *reference* — ZAI_API_KEY must exist in the process env (Doppler injects it);
 # no secret lives in this file.
 #
-# agent-default-model: the model every headless Agent is created with. The
-# headless runner reads ctx.agentDefaultModel at creation time.
+# The models list is the live endpoint catalog (verified against the /models
+# API) so per-run overrides (DSH_MODEL=zai/<id>) resolve.
+#
+# agent-default-model: the fleet default; per-run DSH_MODEL rewrites it.
 
 agent-default-model:
   provider: zai
@@ -30,7 +32,31 @@ llm-pi-ai:
           name: GLM-5.2
           contextWindow: 1000000
           maxTokens: 131072
+        - id: glm-5.1
+          name: GLM-5.1
+          contextWindow: 202752
+          maxTokens: 32768
+        - id: glm-5-turbo
+          name: GLM-5 Turbo
+          contextWindow: 204800
+          maxTokens: 131072
+        - id: glm-5
+          name: GLM-5
+          contextWindow: 204800
+          maxTokens: 131072
         - id: glm-4.7
           name: GLM-4.7
           contextWindow: 200000
+          maxTokens: 65536
+        - id: glm-4.6
+          name: GLM-4.6
+          contextWindow: 200000
+          maxTokens: 65536
+        - id: glm-4.5
+          name: GLM-4.5
+          contextWindow: 131072
+          maxTokens: 65536
+        - id: glm-4.5-air
+          name: GLM-4.5 Air
+          contextWindow: 131072
           maxTokens: 65536
