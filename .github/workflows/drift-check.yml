@@ -102,13 +102,20 @@ jobs:
           Never print secrets or absolute paths."
 
           export REPLY_TARGET=""
+          # Extra host redactions for EVERY scrub of the review (pipeline
+          # tee, drift-verdict log dump) — the same contract
+          # run-dsh-agent.sh applies inside its own process tree.
+          export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
           bash scripts/run-dsh-agent.sh "$TASK" \
             | node scripts/scrub-output.mjs \
             | tee "$RUNNER_TEMP/drift-out.txt"
           # Strict verdict extraction + review-body surfacing (the script
           # header documents the incident). The body is printed to this log
           # on EVERY verdict — BLOCK most of all, where no release exists to
-          # carry it; stdout carries only the verdict word.
+          # carry it; stdout carries only the verdict word. Precedence when
+          # an off-contract reply is ambiguous: the reply's bare verdict
+          # line wins, the review's "## Verdict:" header is the fallback,
+          # prose never qualifies, and no verdict anywhere = no tag.
           VERDICT="$(node scripts/drift-verdict.mjs \
             "$RUNNER_TEMP/drift-out.txt" "$RUNNER_TEMP/drift-review.md")"
           {
@@ -135,7 +142,13 @@ jobs:
           git tag "$NEXT"
           git push origin "$NEXT"
           if [ -f "$RUNNER_TEMP/drift-review.md" ]; then
-            gh release create "$NEXT" --title "$NEXT" --notes-file "$RUNNER_TEMP/drift-review.md"
+            # Release notes are a public surface: the review body is scrubbed
+            # before publishing (fail-closed — a scrubber failure aborts the
+            # step rather than publishing raw notes).
+            node scripts/scrub-output.mjs \
+              < "$RUNNER_TEMP/drift-review.md" \
+              > "$RUNNER_TEMP/drift-review.scrubbed.md"
+            gh release create "$NEXT" --title "$NEXT" --notes-file "$RUNNER_TEMP/drift-review.scrubbed.md"
           else
             gh release create "$NEXT" --title "$NEXT" --notes "Automated release ${NEXT}. Agent review body unavailable; see the run log."
           fi

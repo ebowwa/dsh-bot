@@ -151,6 +151,12 @@ test("drift-check.yml wires the parser in (revert guard)", () => {
     "drift-check must extract verdicts via scripts/drift-verdict.mjs");
   assert.ok(!wf.includes("grep -oE 'TAG-WITH-FINDINGS|TAG|BLOCK'"),
     "the order-sensitive inline grep extractor must not come back");
+  // release notes are a public egress: the review body must be scrubbed
+  // before it is published (review finding #1 on the incident PR)
+  assert.ok(!wf.includes('--notes-file "$RUNNER_TEMP/drift-review.md"'),
+    "raw (unscrubbed) review body must not be published as release notes");
+  assert.ok(wf.includes("drift-review.scrubbed.md"),
+    "release notes must come from the scrubbed copy of the review");
 });
 
 test("gates.yml runs this suite (revert guard)", () => {
