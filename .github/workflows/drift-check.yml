@@ -10,7 +10,10 @@
 #   5. notifies registered consumers (DSH_BOT_CONSUMERS repo variable) via
 #      repository_dispatch so each can open its own bump PR.
 #
-# BLOCK verdict: no tag, red run, review body in the log — a human decides.
+# BLOCK verdict: no tag, red run — scripts/drift-verdict.mjs dumps the
+# scrubbed review body to the run log (run 32568700263 blocked with the body
+# stranded in $RUNNER_TEMP, wiped with the runner: a human got one word) —
+# a human decides.
 # Model: fleet default unless DSH_DRIFT_MODEL is set on this repo.
 
 name: drift-check
@@ -102,7 +105,12 @@ jobs:
           bash scripts/run-dsh-agent.sh "$TASK" \
             | node scripts/scrub-output.mjs \
             | tee "$RUNNER_TEMP/drift-out.txt"
-          VERDICT="$(grep -oE 'TAG-WITH-FINDINGS|TAG|BLOCK' "$RUNNER_TEMP/drift-out.txt" | tail -1 || true)"
+          # Strict verdict extraction + review-body surfacing (the script
+          # header documents the incident). The body is printed to this log
+          # on EVERY verdict — BLOCK most of all, where no release exists to
+          # carry it; stdout carries only the verdict word.
+          VERDICT="$(node scripts/drift-verdict.mjs \
+            "$RUNNER_TEMP/drift-out.txt" "$RUNNER_TEMP/drift-review.md")"
           {
             echo "VERDICT=$VERDICT"
           } >> "$GITHUB_ENV"
