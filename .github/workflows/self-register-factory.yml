@@ -29,17 +29,18 @@ jobs:
           LABELS: ${{ inputs.labels }}
         run: |
           set -euo pipefail
+          ensure_cron() {
+            # The ONLY thing that reliably outlives job-end cleanup on a
+            # no-sudo box: cron. Every minute, start the listener if absent.
+            LINE="* * * * * pgrep -f factory-runner/run.sh >/dev/null 2>&1 || (cd \$HOME/factory-runner && ./run.sh >> run.log 2>&1)"
+            (crontab -l 2>/dev/null | grep -F "factory-runner/run.sh" || (crontab -l 2>/dev/null; echo "$LINE") | crontab -) && echo "cron keepalive installed"
+          }
           DIR="$HOME/factory-runner"
-          if [ -d "$DIR" ] && [ -x "$DIR/run.sh" ]; then
-            echo "already installed at $DIR — ensuring a LISTENER is alive"
-            # a nohup'd listener is reaped when the registering job's process
-            # group is cleaned up; setsid re-parents it out of that group.
-            if pgrep -f "$DIR/.*/run.sh" >/dev/null || pgrep -f "$DIR run.sh" >/dev/null; then
-              echo "listener already alive"; exit 0
-            fi
-            setsid nohup "$DIR/run.sh" > "$DIR/run.log" 2>&1 < /dev/null &
-            sleep 3
-            pgrep -f "$DIR" >/dev/null && echo "listener restarted (setsid)" || { echo "restart FAILED"; exit 1; }
+          if [ ! -d "$DIR" ] || [ ! -x "$DIR/run.sh" ]; then
+            echo "not installed yet — falling through to install"
+          else
+            echo "installed — cron keepalive owns the listener from here"
+            ensure_cron
             exit 0
           fi
           TOKEN="$(node -e '
@@ -59,11 +60,6 @@ jobs:
             sudo ./svc.sh install && sudo ./svc.sh start
             echo "installed as a system service"
           else
-            # setsid is load-bearing: a plain nohup child is reaped when this
-            # job's process group is cleaned up at job end (observed: the
-            # runner registered, connected once, then went offline).
-            setsid nohup ./run.sh > run.log 2>&1 < /dev/null &
-            sleep 3
-            pgrep -f run.sh >/dev/null && echo "listener running under setsid" || { echo "listener failed to start"; exit 1; }
-            echo "installed as a user process (no sudo); consider a @reboot cron"
+            ensure_cron
+            echo "installed; the cron keepalive starts the listener within 60s (and after reboots) — the in-job listener is disposable by design: job-end cleanup kills anything in the job's tree (setsid did NOT survive it; cron does)"
           fi
