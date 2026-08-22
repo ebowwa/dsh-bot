@@ -89,10 +89,12 @@ fi
 # job on the other), and a job-scoped home makes cleanup atomic (rm -rf).
 # Set DSH_PERSISTENT_HOME=1 to opt back into a shared home (then
 # DSH_KEEP_SESSIONS governs transcripts).
-if [ -n "${DSH_PERSISTENT_HOME:-}" ]; then
+# JOB_SCOPED_HOME is 1 ONLY when this script minted the home itself — an
+# externally-supplied DSH_HOME is never rm -rf'd at exit, whatever mode.
+if [ -n "${DSH_HOME:-}" ] || [ -n "${DSH_PERSISTENT_HOME:-}" ]; then
   export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 else
-  export DSH_HOME="${DSH_HOME:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dsh-home.$$}"
+  export DSH_HOME="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dsh-home.$$"
   JOB_SCOPED_HOME=1
 fi
 # Hostnames the scrubber redacts on output surfaces beyond the generic
