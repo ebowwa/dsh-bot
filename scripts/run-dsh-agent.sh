@@ -88,6 +88,32 @@ export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 # Hostnames the scrubber redacts on output surfaces beyond the generic
 # patterns; supplied by the consumer's (private) workflow config.
 export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
+
+# Per-run model override: "provider/model" (e.g. zai/glm-5.2). When set, a
+# per-run settings overlay is written ahead of the agent so this run's
+# Agent resolves the requested model instead of the fleet default. Format:
+#   DSH_MODEL=zai/glm-5.2      DSH_MODEL=opencode-go2/deepseek-v4-flash
+if [ -n "${DSH_MODEL:-}" ]; then
+  case "$DSH_MODEL" in
+    */*) PROVIDER="${DSH_MODEL%/*}"; MODEL_ID="${DSH_MODEL#*/}";;
+    *)   echo "error: DSH_MODEL must be provider/model (got '$DSH_MODEL')" >&2; exit 2;;
+  esac
+  # Overlay AFTER the base settings file: dsh-settings-file loads one
+  # document; we rewrite agent-default-model in place each run (runners are
+  # single-job, and the next run re-applies its own value either way).
+  SETTINGS="$DSH_HOME/settings.yaml"
+  if [ -f "$SETTINGS" ]; then
+    node -e '
+      const fs = require("fs");
+      const p = process.argv[1], provider = process.argv[2], model = process.argv[3];
+      const doc = fs.readFileSync(p, "utf8");
+      const out = doc.replace(/^agent-default-model:\n(?:[ \t].*\n)*[ \t]*provider:.*\n[ \t]*model:.*$/m,
+        `agent-default-model:\n  provider: ${provider}\n  model: ${model}`);
+      fs.writeFileSync(p, out);
+    ' "$SETTINGS" "$PROVIDER" "$MODEL_ID" || true
+    echo "per-run model: $PROVIDER/$MODEL_ID" >&2
+  fi
+fi
 export DSH_PERMISSION_MODE="${DSH_PERMISSION_MODE:-danger-full-access}"
 DSH_VERSION="${DSH_VERSION:-0.1.0-rc.7}"
 

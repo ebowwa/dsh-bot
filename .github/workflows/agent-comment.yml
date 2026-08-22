@@ -39,6 +39,10 @@ on:
         description: "Git ref of ebowwa/dsh-bot to fetch scripts from (defaults to the called workflow's own pinned ref)"
         type: string
         default: ""
+      model:
+        description: "Model for this run: provider/model (e.g. zai/glm-5.2). Empty = fleet default (zai/glm-5.3)"
+        type: string
+        default: ""
       extra-scrub-hosts:
         description: "Comma-separated hostnames to redact on output surfaces (runner fleet names — this file is public, hosts are consumer-private)"
         type: string
@@ -94,6 +98,7 @@ jobs:
           TARGET_NUM: ${{ github.event.pull_request.number || github.event.issue.number }}
           REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
           EXTRA_SCRUB_HOSTS: ${{ inputs.extra-scrub-hosts }}
+          DSH_MODEL: ${{ inputs.model }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail

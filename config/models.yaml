@@ -1,0 +1,54 @@
+# Model catalog for dsh-bot consumers — the models the Z.AI coding endpoint
+# actually serves (verified against the live /models API). provider/model ids
+# here are the values the `model:` workflow input and DSH_MODEL accept.
+#
+# Contexts are from the endpoint's own metadata; maxTokens conservative.
+
+models:
+  # flagship — default for worker + reviewer
+  - id: zai/glm-5.3
+    context: 1000000
+    maxTokens: 131072
+    tier: flagship
+  # near-flagship — cheaper worker for routine tasks
+  - id: zai/glm-5.2
+    context: 1000000
+    maxTokens: 131072
+    tier: near-flagship
+  # fast/cheap lane candidates
+  - id: zai/glm-5.1
+    context: 202752
+    maxTokens: 32768
+    tier: fast
+  - id: zai/glm-5-turbo
+    context: 204800
+    maxTokens: 131072
+    tier: fast
+  - id: zai/glm-5
+    context: 204800
+    maxTokens: 131072
+    tier: fast
+  - id: zai/glm-4.7
+    context: 200000
+    maxTokens: 65536
+    tier: standard
+  - id: zai/glm-4.6
+    context: 200000
+    maxTokens: 65536
+    tier: standard
+  - id: zai/glm-4.5
+    context: 131072
+    maxTokens: 65536
+    tier: cheap
+  - id: zai/glm-4.5-air
+    context: 131072
+    maxTokens: 65536
+    tier: cheapest
+
+# Role defaults (consumer shells may override per-call):
+#   worker  (agent-comment/agent-dispatch): zai/glm-5.3
+#   reviewer (agent-review):                zai/glm-5.3
+#   cheap worker for mechanical tasks:      zai/glm-5.2 or glm-5-turbo
+role-defaults:
+  worker: zai/glm-5.3
+  reviewer: zai/glm-5.3

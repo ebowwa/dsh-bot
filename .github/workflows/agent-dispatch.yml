@@ -17,6 +17,10 @@ on:
         description: "Lane: auto | big | mac | linux"
         type: string
         default: "auto"
+      model:
+        description: "Model for this run: provider/model (e.g. zai/glm-5.2). Empty = fleet default"
+        type: string
+        default: ""
       timeout-minutes:
         type: number
         default: 120
@@ -54,6 +58,7 @@ jobs:
           DOPPLER_SERVICE_TOKEN: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
           GH_TOKEN: ${{ github.token }}
           TASK_INPUT: ""
+          DSH_MODEL: ${{ inputs.model }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail

@@ -17,6 +17,10 @@ on:
         description: "Review rules document the reviewer must ground itself in"
         type: string
         default: "REVIEW.md"
+      model:
+        description: "Model for this run: provider/model (e.g. zai/glm-5.2). Empty = fleet default"
+        type: string
+        default: ""
       timeout-minutes:
         description: "Per-review cap in minutes"
         type: number
@@ -71,6 +75,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ steps.pr.outputs.number }}
           RULES_FILE: ${{ inputs.rules-file }}
+          DSH_MODEL: ${{ inputs.model }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail
