@@ -111,6 +111,9 @@ jobs:
       - name: Tag + release + notify (only on TAG verdicts)
         env:
           GH_TOKEN: ${{ github.token }}
+          # repository_dispatch to CONSUMER repos needs a PAT (github.token
+          # is repo-scoped); falls back gracefully for public-mode consumers.
+          PAT_TOKEN: ${{ secrets.DSH_BOT_REPO_TOKEN }}
           NEXT: ${{ steps.scope.outputs.next }}
           VERDICT: ${{ env.VERDICT }}
         run: |
@@ -134,7 +137,10 @@ jobs:
           CONSUMERS="$(printf '%s' "${{ vars.DSH_BOT_CONSUMERS }}" | tr ',[:space:]' '\n')"
           while read -r repo; do
             [ -n "$repo" ] || continue
-            gh api "repos/$repo/dispatches" --method POST -f event_type="dsh-bot-release" \
-              -f "client_payload[tag]=${NEXT}" 2>/dev/null \
+            DISPATCH_TOKEN="${PAT_TOKEN:-$GH_TOKEN}"
+            gh api "repos/$repo/dispatches" --method POST \
+              -H "Authorization: Bearer $DISPATCH_TOKEN" \
+              -f event_type="dsh-bot-release" \
+              -F "client_payload[tag]=${NEXT}" 2>/dev/null \
               && echo "notified $repo" || echo "notify failed: $repo"
           done <<< "$CONSUMERS"
