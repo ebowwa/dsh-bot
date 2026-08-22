@@ -29,6 +29,14 @@ jobs:
           LABELS: ${{ inputs.labels }}
         run: |
           set -euo pipefail
+          spawn_listener() {
+            # TRUE orphan: the ( ... & ) subshell exits instantly, so the
+            # child re-parents to init BEFORE the job's cleanup walks its
+            # descendant tree — setsid alone failed because the child was
+            # still a descendant at kill time. cron was installed as a
+            # keepalive but this box runs no crond.
+            ( setsid "$DIR/run.sh" </dev/null >>"$DIR/run.log" 2>&1 & )
+          }
           ensure_cron() {
             # The ONLY thing that reliably outlives job-end cleanup on a
             # no-sudo box: cron. Every minute, start the listener if absent.
@@ -39,8 +47,9 @@ jobs:
           if [ ! -d "$DIR" ] || [ ! -x "$DIR/run.sh" ]; then
             echo "not installed yet — falling through to install"
           else
-            echo "installed — cron keepalive owns the listener from here"
+            echo "installed — spawning an orphan listener (cron keepalive too)"
             ensure_cron
+            spawn_listener
             exit 0
           fi
           TOKEN="$(node -e '
@@ -61,5 +70,6 @@ jobs:
             echo "installed as a system service"
           else
             ensure_cron
-            echo "installed; the cron keepalive starts the listener within 60s (and after reboots) — the in-job listener is disposable by design: job-end cleanup kills anything in the job's tree (setsid did NOT survive it; cron does)"
+            spawn_listener
+            echo "installed; orphan listener spawned, cron keepalive armed (starts the listener within 60s (and after reboots) — the in-job listener is disposable by design: job-end cleanup kills anything in the job's tree (setsid did NOT survive it; cron does)"
           fi
