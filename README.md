@@ -17,6 +17,7 @@ secrets. This repo needs no runners of its own.
 | `.github/workflows/agent-review.yml` | adversarial review stage (rules + gates + verdict + labels) |
 | `.github/workflows/agent-dispatch.yml` | manual/scheduled task entry |
 | `scripts/run-dsh-agent.sh` | driver: dsh install, settings bootstrap, gh/git identity, scrub shims, live trace, Doppler exec |
+| `scripts/write-settings.mjs` | fail-closed settings overlay: applies the per-run model to the template and verifies the written `agent-default-model` (exits nonzero instead of silently running the wrong model) |
 | `scripts/scrub-output.mjs` | redaction (creds/PII/SSH keys in both directions; IP/host/path/date on outputs) |
 | `scripts/gh-scrub-shim`, `git-scrub-shim` | the scrubber BETWEEN agent and GitHub/git |
 | `scripts/dsh-progress.mjs` | live JSON trace of reasoning/tool events |
@@ -37,3 +38,11 @@ Consumers pin `@v1` (moving major tag). Breaking changes bump the major.
 Scrubber/security fixes land as minors and reach consumers only through a
 drift-check bump PR merged by each repo's own gates + review — the audit
 gate. Nothing propagates silently.
+
+## Gates
+
+`npm test` (or `bun run test`) runs the offline suite: behavioral tests for
+the settings overlay plus static/architecture guards (`bash -n`,
+`node --check`, inline-`node -e` payload extraction — the class of bug that
+blocked release run 32548668443). `npm run typecheck` and `npm run arch` run
+those guards standalone. No network, no dsh, no Doppler.

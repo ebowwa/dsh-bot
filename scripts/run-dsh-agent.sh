@@ -90,8 +90,13 @@ export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
 
 # Per-run model: "provider/model" (e.g. zai/glm-5.2). Settings are
-# REGENERATED from the pristine template every run (never regex-patched in
-# place): idempotent, immune to drift, restores the default after overrides.
+# REGENERATED from the pristine template every run by write-settings.mjs,
+# which re-parses what it wrote and exits nonzero unless the
+# agent-default-model block resolves to the requested route. There is NO
+# fallback: if the overlay cannot honor the model, this job stops here
+# instead of silently running the fleet default. (That silence — an inline
+# `node -e` regex broken across lines, swallowed by a `|| cp` fallback — is
+# what silently no-oped DSH_MODEL and blocked drift-check run 32548668443.)
 #   DSH_MODEL=zai/glm-5.2      DSH_MODEL=opencode-go2/deepseek-v4-flash
 EFFECTIVE_MODEL="${DSH_MODEL:-${DSH_DEFAULT_MODEL:-zai/glm-5.3}}"
 case "$EFFECTIVE_MODEL" in
@@ -104,9 +109,8 @@ MODEL_ID="${EFFECTIVE_MODEL#*/}"
 SETTINGS_TEMPLATE="${DSH_SETTINGS_TEMPLATE:-$SCRIPT_DIR/../config/settings.zai.yaml}"
 if [ -f "$SETTINGS_TEMPLATE" ]; then
   mkdir -p "$DSH_HOME"
-  node -e 'const fs=require("fs");const t=fs.readFileSync(process.argv[1],"utf8");const out=t.replace(/^  model: \S+$/m,"  model: "+process.argv[2]);fs.writeFileSync(process.argv[3],out);' \
-    "$SETTINGS_TEMPLATE" "$MODEL_ID" "$DSH_HOME/settings.yaml" \
-    || cp "$SETTINGS_TEMPLATE" "$DSH_HOME/settings.yaml"
+  node "$SCRIPT_DIR/write-settings.mjs" \
+    "$SETTINGS_TEMPLATE" "$EFFECTIVE_MODEL" "$DSH_HOME/settings.yaml"
   echo "run model: $PROVIDER/$MODEL_ID${DSH_MODEL:+ (overridden)}" >&2
 elif [ -f "$DSH_HOME/settings.yaml" ]; then
   # no template available: leave existing settings (fleet default assumed)
