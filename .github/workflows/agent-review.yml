@@ -29,6 +29,11 @@ on:
         description: "Git ref of ebowwa/dsh-bot to fetch scripts from"
         type: string
         default: ""
+      # Comma/JSON labels the review job runs on (default the dsh pool).
+      # Callers whose runners carry different labels pass their own.
+      runner-labels:
+        type: string
+        default: '["self-hosted","dsh"]'
       pr:
         description: "PR number to review (workflow_dispatch callers pass this)"
         type: string
@@ -36,7 +41,7 @@ on:
 
 jobs:
   dsh-review:
-    runs-on: [self-hosted, dsh]
+    runs-on: ${{ fromJSON(inputs.runner-labels) }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - name: Resolve PR number
