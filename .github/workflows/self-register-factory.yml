@@ -1,0 +1,58 @@
+name: self-register-factory
+
+# Runs ON a dsh-bot runner and registers THAT MACHINE as an additional
+# executor for the factory repo (github-activity-tracker) — side-by-side
+# install, this repo's own runner is untouched. Idempotent: skips if the
+# install directory exists. Dispatched when the factory queue is saturated
+# and this box is idle (fleet self-scaling).
+on:
+  workflow_dispatch:
+    inputs:
+      runner_name:
+        description: "Registered name for the factory"
+        type: string
+        default: "hetzner-factory"
+      labels:
+        description: "Labels (comma-separated)"
+        type: string
+        default: "self-hosted,Linux,X64,dsh"
+
+jobs:
+  register:
+    runs-on: [self-hosted, dsh]
+    timeout-minutes: 15
+    steps:
+      - name: Register this machine with the factory repo (idempotent)
+        env:
+          GH_PAT: ${{ secrets.BOT_PAT }}
+          NAME: ${{ inputs.runner_name }}
+          LABELS: ${{ inputs.labels }}
+        run: |
+          set -euo pipefail
+          DIR="$HOME/factory-runner"
+          if [ -d "$DIR" ] && [ -x "$DIR/run.sh" ]; then
+            echo "already installed at $DIR — ensuring service is up"
+            sudo "$DIR/svc.sh" start 2>/dev/null || "$DIR/run.sh" --once >/dev/null 2>&1 || true
+            exit 0
+          fi
+          TOKEN="$(node -e '
+            const r = await fetch("https://api.github.com/repos/ebowwa/github-activity-tracker/actions/runners/registration-token",
+              { method: "POST", headers: { Authorization: "token " + process.env.GH_PAT, Accept: "application/vnd.github+json" } });
+            const d = await r.json();
+            if (!d.token) { console.error(JSON.stringify(d).slice(0,200)); process.exit(1); }
+            process.stdout.write(d.token);
+          ')"
+          VER="2.327.1"
+          mkdir -p "$DIR" && cd "$DIR"
+          curl -sL -o runner.tgz "https://github.com/actions/runner/releases/download/v${VER}/actions-runner-linux-x64-${VER}.tar.gz"
+          tar xzf runner.tgz && rm runner.tgz
+          ./config.sh --url https://github.com/ebowwa/github-activity-tracker \
+            --token "$TOKEN" --name "$NAME" --labels "$LABELS" --unattended --replace
+          if command -v systemctl >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            sudo ./svc.sh install && sudo ./svc.sh start
+            echo "installed as a system service"
+          else
+            nohup ./run.sh > run.log 2>&1 &
+            disown
+            echo "installed as a user process (no sudo); add a @reboot cron if this box restarts"
+          fi
