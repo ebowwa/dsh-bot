@@ -89,14 +89,10 @@ export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 # patterns; supplied by the consumer's (private) workflow config.
 export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
 
-# Per-run model override: "provider/model" (e.g. zai/glm-5.2). When set, a
-# per-run settings overlay is written ahead of the agent so this run's
-# Agent resolves the requested model instead of the fleet default. Format:
+# Per-run model: "provider/model" (e.g. zai/glm-5.2). Settings are
+# REGENERATED from the pristine template every run (never regex-patched in
+# place): idempotent, immune to drift, restores the default after overrides.
 #   DSH_MODEL=zai/glm-5.2      DSH_MODEL=opencode-go2/deepseek-v4-flash
-# Resolve the effective model FIRST: an explicit DSH_MODEL, else the fleet
-# default. Always rewriting (even when unset) restores the default after a
-# previous job on this runner overrode it — single-job-per-runner means the
-# previous job's value would otherwise leak into this one.
 EFFECTIVE_MODEL="${DSH_MODEL:-${DSH_DEFAULT_MODEL:-zai/glm-5.3}}"
 case "$EFFECTIVE_MODEL" in
   */*) ;;
@@ -104,23 +100,19 @@ case "$EFFECTIVE_MODEL" in
 esac
 PROVIDER="${EFFECTIVE_MODEL%/*}"
 MODEL_ID="${EFFECTIVE_MODEL#*/}"
-if [ -f "$DSH_HOME/settings.yaml" ]; then
-  SETTINGS="$DSH_HOME/settings.yaml"
-  node -e '
-    const fs = require("fs");
-    const p = process.argv[1], provider = process.argv[2], model = process.argv[3];
-    const doc = fs.readFileSync(p, "utf8");
-    const out = doc.replace(/^agent-default-model:
-(?:[ 	].*
-)*[ 	]*provider:.*
-[ 	]*model:.*$/m,
-      `agent-default-model:
-  provider: ${provider}
-  model: ${model}`);
-    fs.writeFileSync(p, out);
-  ' "$SETTINGS" "$PROVIDER" "$MODEL_ID" || true
+
+SETTINGS_TEMPLATE="${DSH_SETTINGS_TEMPLATE:-$SCRIPT_DIR/../config/settings.zai.yaml}"
+if [ -f "$SETTINGS_TEMPLATE" ]; then
+  mkdir -p "$DSH_HOME"
+  node -e 'const fs=require("fs");const t=fs.readFileSync(process.argv[1],"utf8");const out=t.replace(/^  model: \S+$/m,"  model: "+process.argv[2]);fs.writeFileSync(process.argv[3],out);' \
+    "$SETTINGS_TEMPLATE" "$MODEL_ID" "$DSH_HOME/settings.yaml" \
+    || cp "$SETTINGS_TEMPLATE" "$DSH_HOME/settings.yaml"
   echo "run model: $PROVIDER/$MODEL_ID${DSH_MODEL:+ (overridden)}" >&2
+elif [ -f "$DSH_HOME/settings.yaml" ]; then
+  # no template available: leave existing settings (fleet default assumed)
+  echo "run model: $PROVIDER/$MODEL_ID (no template; settings untouched)" >&2
 fi
+
 export DSH_PERMISSION_MODE="${DSH_PERMISSION_MODE:-danger-full-access}"
 DSH_VERSION="${DSH_VERSION:-0.1.0-rc.7}"
 
