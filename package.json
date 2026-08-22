@@ -1,0 +1,10 @@
+{
+  "name": "dsh-bot",
+  "private": true,
+  "description": "Reusable dsh agent-loop toolkit (see README.md)",
+  "scripts": {
+    "test": "node --test scripts/test/*.test.mjs",
+    "typecheck": "node scripts/ci/static-check.mjs",
+    "arch": "node scripts/ci/arch-check.mjs"
+  }
+}
