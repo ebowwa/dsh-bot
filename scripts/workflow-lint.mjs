@@ -36,10 +36,51 @@ const splitIndent = (raw) => {
   return { indent: m.length, body: raw.slice(m.length) };
 };
 
-/** Does body look like `key:` / `key: value`? Returns [key, value|null]. */
+/** Does body look like `key:` / `key: value`? Returns [key, value|null].
+ * Quote- and comment-aware: a colon inside quotes or a trailing comment
+ * does not open a key, and keys starting with a YAML indicator character
+ * (& * ! % @ ` ?) or containing quotes are not workflow keys — otherwise
+ * scalar-body debris dedented out of its block slides through as
+ * structure (review findings on PR #11, rounds 3–4). */
 const keyParts = (body) => {
-  const m = /^([^:#\s][^:]*?):(?:\s+(.*))?$/.exec(body);
-  return m ? [m[1], m[2] ?? null] : null;
+  let q = null;
+  let keyEnd = -1;
+  for (let j = 0; j < body.length; j++) {
+    const c = body[j];
+    if (q) { if (c === q) q = null; continue; }
+    if (c === '"' || c === "'") {
+      // a quoted segment BEFORE any key colon: not a plain workflow key
+      if (keyEnd < 0) return null;
+      q = c;
+      continue;
+    }
+    // a comment (space-#) before any top-level colon: no key on this line
+    if (c === "#" && j > 0 && (body[j - 1] === " " || body[j - 1] === "\t")) return null;
+    if (c === ":" && (j === body.length - 1 || body[j + 1] === " " || body[j + 1] === "\t")) {
+      keyEnd = j;
+      break;
+    }
+  }
+  if (keyEnd <= 0) return null;
+  const key = body.slice(0, keyEnd);
+  // keys starting with a flow/indicator character (or a leading ':') are
+  // scalar debris, not workflow keys — workflow keys are identifiers
+  if (/^[&*!%@`?:,[\]{}]/.test(key)) return null;
+  const value = body.slice(keyEnd + 1).trim();
+  return [key, value === "" ? null : value];
+};
+
+/** Net bracket depth of a line, ignoring quoted segments ([{ = +1, ]} = -1). */
+const netBrackets = (s) => {
+  let n = 0;
+  let q = null;
+  for (const c of s) {
+    if (q) { if (c === q) q = null; }
+    else if (c === '"' || c === "'") q = c;
+    else if (c === "[" || c === "{") n++;
+    else if (c === "]" || c === "}") n--;
+  }
+  return n;
 };
 
 /**
@@ -76,6 +117,9 @@ export function lintWorkflow(text, name = "workflow") {
   // Most recent key line carrying an inline PLAIN (non-block) value: a
   // deeper non-key line after it is a plain-scalar continuation (legal).
   let lastPlainKey = null;
+  // Open flow-collection depth: lines inside a multi-line [..] or {..}
+  // (or after an unbalanced opener) are flow content, not block structure.
+  let flowDepth = 0;
 
   const err = (line, message) => errors.push({ line, message: `${name}:${line}: ${message}` });
   const top = () => stack[stack.length - 1];
@@ -95,19 +139,26 @@ export function lintWorkflow(text, name = "workflow") {
     const raw = lines[i];
     const { indent, body } = splitIndent(raw);
 
-    // Block-scalar handling: the first non-blank content line fixes `base`;
-    // blank lines and lines at >= base are content. Anything else ends the
-    // scalar — a dedent to between keyIndent and base re-enters structural
-    // processing below (a real parser rejects the file there), a dedent to
-    // keyIndent or less is the normal scalar end.
+    // Block-scalar handling: the first non-blank content line fixes `base`
+    // — and MUST sit strictly deeper than the header key's column. A first
+    // line at/below the key column means either an empty scalar (legal,
+    // and the line is structural) or a body dedented to/past its key (the
+    // uniform re-indent accident, review finding on PR #11) — the line
+    // falls through and classification tells them apart. Blank lines and
+    // lines at >= base are content. Any other dedent ends the scalar and
+    // re-enters structural processing (a real parser rejects the file).
+    let scalarBreakKey = null;
     if (scalar) {
       if (body === "") continue;
       if (scalar.base === null) {
-        scalar.base = indent;
-        continue;
-      }
-      if (indent >= scalar.base) continue;
-      scalar = null; // this line re-enters normal processing below
+        if (indent > scalar.keyIndent) {
+          scalar.base = indent;
+          continue;
+        }
+        scalarBreakKey = scalar.keyIndent;
+        scalar = null; // this line re-enters normal processing below
+      } else if (indent >= scalar.base) continue;
+      else scalar = null; // this line re-enters normal processing below
     }
 
     if (body === "") continue;
@@ -117,6 +168,7 @@ export function lintWorkflow(text, name = "workflow") {
       pendingKey = null;
       docRootColumn = null;
       lastPlainKey = null;
+      flowDepth = 0;
       continue;
     }
     if (/^\s*\t/.test(raw)) {
@@ -124,14 +176,39 @@ export function lintWorkflow(text, name = "workflow") {
       continue;
     }
 
+    // multi-line flow collections ([..] / {..}): content until balanced
+    if (flowDepth > 0) {
+      flowDepth += netBrackets(body);
+      continue;
+    }
+
     const seqMatch = /^-(?:\s+(.*))?$/.exec(body);
     const kp = seqMatch ? null : keyParts(body);
     if (!seqMatch && !kp) {
+      if (scalarBreakKey !== null) {
+        err(no,
+          `block scalar content at column ${indent} is not deeper than its key at column ` +
+          `${scalarBreakKey} — invalid block YAML (the whole body dedented to/past its key)`);
+        continue;
+      }
       // plain multi-line scalar continuation (review finding on PR #11):
       // `key: value` folds across deeper lines that are not keys
       if (lastPlainKey && indent > lastPlainKey.indent) continue;
+      // a value-less key's plain scalar value, written on the next line
+      // (`runs-on:\n  ubuntu-latest`) — legal; fills the key's slot
+      if (pendingKey && !pendingKey.hasValue && indent > pendingKey.indent) {
+        pendingKey.hasValue = true;
+        lastPlainKey = { indent: pendingKey.indent };
+        continue;
+      }
       err(no, `line is neither a mapping key nor a sequence item: '${body.slice(0, 40)}'`);
       continue;
+    }
+    // an unbalanced opener starts a flow collection consumed above
+    const openFlow = netBrackets(body);
+    if (openFlow > 0) {
+      flowDepth = openFlow;
+      lastPlainKey = null;
     }
 
     while (stack.length && indent < top().indent) stack.pop();

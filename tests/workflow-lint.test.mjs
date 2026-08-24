@@ -255,6 +255,82 @@ jobs:
   assert.deepEqual(lintWorkflow(ok), []);
 });
 
+test("a block scalar body dedented to or past its key is rejected (review finding 1, round 4)", () => {
+  // The whole run body re-indented to the key's own column (base == key)
+  // and one below it (base < key): a real parser rejects both; the fuzz
+  // found these were the largest remaining false-negative class.
+  const atKey = `name: x
+on: push
+jobs:
+  j:
+    steps:
+      - name: a
+        run: |
+        echo one
+        echo two
+`;
+  const errorsA = lintWorkflow(atKey, "wf");
+  assert.ok(errorsA.length > 0, "a body at the key's column must not lint clean");
+  assert.match(errorsA[0].message, /not deeper than its key/);
+
+  const belowKey = atKey.replace("        echo one", "       echo one").replace("        echo two", "       echo two");
+  const errorsB = lintWorkflow(belowKey, "wf");
+  assert.ok(errorsB.length > 0, "a body below the key's column must not lint clean");
+  assert.match(errorsB[0].message, /not deeper than its key/);
+
+  // an EMPTY block scalar (next line structural) stays legal
+  const empty = `name: x
+on: push
+jobs:
+  j:
+    steps:
+      - name: a
+        run: |
+        if: always()
+`;
+  assert.deepEqual(lintWorkflow(empty, "wf"), []);
+});
+
+test("value-less keys with plain scalar values and multi-line flows are legal (review finding 2, round 4)", () => {
+  const ok = `name: x
+on: push
+jobs:
+  j:
+    runs-on:
+      ubuntu-latest
+    steps:
+      - name: a
+        run: echo hi
+  k:
+    runs-on: [
+      self-hosted,
+      dsh
+    ]
+    steps:
+      - run: echo bye
+`;
+  assert.deepEqual(lintWorkflow(ok), []);
+});
+
+test("scalar-body debris starting with YAML indicators is not misread as keys (review finding 3, round 4)", () => {
+  // '&& echo ...' dedented below a scalar's base: plain scalars cannot
+  // start with an indicator, so it must be flagged, not parsed as a key
+  const broken = `name: x
+on: push
+jobs:
+  j:
+    steps:
+      - name: a
+        run: |
+            for repo in a b; do
+              notify "$repo"
+            done
+          && echo "notify failed: $repo"
+`;
+  const errors = lintWorkflow(broken, "wf");
+  assert.ok(errors.length > 0, "indicator-initial debris must not lint clean");
+});
+
 test("all shipped workflow files lint clean (revert guard)", () => {
   const names = readdirSync(WF_DIR).filter((n) => n.endsWith(".yml") || n.endsWith(".yaml"));
   assert.ok(names.length > 0, "expected shipped workflow files to exist");
