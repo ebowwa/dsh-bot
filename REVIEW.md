@@ -6,6 +6,10 @@ Review rules for dsh-bot, applied by the dsh review stage (and any human).
 
 - Shell scripts pass bash -n; node scripts pass node --check (gates enforces
   both — a review that skipped gates is invalid on its face).
+- Workflow files pass `scripts/workflow-lint.mjs` (gates enforces it): a
+  structurally invalid workflow — e.g. a step dedented out of its `steps:`
+  sequence, the run-32705244305 class — parses nowhere and 422s every
+  dispatch; it must never merge green again.
 - Scrubbing is fail-closed: if the scrubber cannot run, the pipeline must
   abort rather than pass unscrubbed text onward. Any change that makes a
   scrub failure non-fatal is rejected.

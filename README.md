@@ -20,6 +20,7 @@ secrets. This repo needs no runners of its own.
 | `scripts/scrub-output.mjs` | redaction (creds/PII/SSH keys in both directions; IP/host/path/date on outputs) |
 | `scripts/gh-scrub-shim`, `git-scrub-shim` | the scrubber BETWEEN agent and GitHub/git |
 | `scripts/dsh-progress.mjs` | live JSON trace of reasoning/tool events |
+| `scripts/workflow-lint.mjs` | structural workflow-YAML lint (block-indent consistency; gates runs it — run 32705244305 regression) |
 | `config/settings.zai.yaml` | DSH settings template (zai provider, glm-5.3) |
 | `consumers.txt` | repos receiving drift bump-PRs |
 

@@ -40,11 +40,16 @@ jobs:
           done
           exit "$fail"
       - name: Workflow YAML parses
+        # tab check + structural lint: run 32705244305 merged a workflow whose
+        # step indented 4 spaces inside a 6-space steps: list — invalid block
+        # YAML, zero jobs, every dispatch 422'd — and this gate passed it,
+        # because "parses" only rejected tabs. The lint makes the gate honest.
         run: |
           set -euo pipefail
           for f in .github/workflows/*.yml; do
             node -e "const fs=require('fs');const s=fs.readFileSync(process.argv[1],'utf8');if(/\t/.test(s))throw new Error('tab in '+process.argv[1])" "$f"
           done
+          node scripts/workflow-lint.mjs .github/workflows/*.yml
       - name: Unit tests
         # bare --test auto-discovers *.test.mjs (a directory argument is not
         # portable across the node versions on the runner lanes)
