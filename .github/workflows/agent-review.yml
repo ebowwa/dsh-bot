@@ -70,7 +70,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ebowwa/dsh-bot
-          ref: ${{ inputs.dsh-bot-ref || github.ref }}
+          # dsh-bot-ref when given; else MAIN — never github.ref: the
+          # CALLER may fire this workflow from a target repo whose default
+          # branch is not main (ANE: dev), and dsh-bot has no such branch —
+          # the fetch died with "couldn't find remote ref refs/heads/dev"
+          # on every cross-repo tower review (observed 2026-08-24).
+          ref: ${{ inputs.dsh-bot-ref || 'main' }}
           path: .dsh-bot
           token: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
 
