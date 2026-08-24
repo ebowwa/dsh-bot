@@ -83,6 +83,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dsh-session-${{ github.run_id }}
-          path: ${{ env.DSH_HOME }}/sessions/
+          # DSH_HOME_JOB is published by run-dsh-agent.sh via GITHUB_ENV
+          # (job-scoped home; the PID-based dirname is unknowable here).
+          path: ${{ env.DSH_HOME_JOB }}/sessions/
           retention-days: 14
-          if-no-files-found: ignore
+        if-no-files-found: warn
