@@ -21,7 +21,20 @@
 //     sequence and join the map below it (the legal 'steps:\n- x\nnext:'
 //     style) but may not collide with or float between open scopes;
 //   - nesting under a key/item that already has a value is an error;
-//   - no tab indentation.
+//   - no tab indentation;
+//   - SCHEMA (run-32719897425): a map that is the body of a sequence item
+//     directly under 'steps:' may only carry GitHub's documented step keys.
+//     'if-no-files-found' dedented onto the step level is valid block YAML
+//     (a sibling of 'with:') but an unknown workflow key — GitHub rejects
+//     the whole file at parse ("Unexpected value", zero jobs, every
+//     workflow_call 422s) and the structure-only lint above waved that
+//     exact file through green on main. Structure ≠ schema; this closes it.
+//
+// Scope note: only the steps-item schema is enforced — the twice-observed
+// defect class (32705244305, 32719897425, both step-level). Job-level and
+// with:-level key sets are not enumerated; dedents that land THERE are
+// caught structurally or by GitHub, and an over-eager allowlist would be
+// a false-positive machine.
 // Block scalars (run: |, runs-on: >-) are opaque text once their base
 // indent is fixed by the first content line; a dedent to between the
 // header key's column and that base ends the scalar and is flagged.
@@ -83,6 +96,20 @@ const netBrackets = (s) => {
   return n;
 };
 
+/** GitHub's documented step keys (union of run-steps and uses-steps).
+ * A sequence-item map directly under 'steps:' may carry these and only
+ * these; anything else fails the whole file at GitHub's parser. */
+const STEP_KEYS = new Set([
+  "id", "name", "if", "uses", "run", "shell", "working-directory",
+  "env", "with", "continue-on-error", "timeout-minutes",
+]);
+
+/** Error text for a non-step key found in a steps-item body. */
+const stepKeyError = (key) =>
+  `step key '${key}' is not one of GitHub's step keys (${[...STEP_KEYS].sort().join(", ")}) — ` +
+  `GitHub rejects the whole workflow file at parse (run-32719897425 defect class: ` +
+  `a 'with:' input dedented onto the step level is valid YAML but an invalid workflow)`;
+
 /**
  * Lint one workflow file's text.
  * @param {string} text raw YAML
@@ -94,12 +121,16 @@ export function lintWorkflow(text, name = "workflow") {
   const lines = text.split(/\r?\n/);
 
   /**
-   * Block-scope stack. Map entries: {indent, kind:'map', line}.
-   * Seq entries additionally track the CURRENT item so deeper lines can be
-   * checked against it: {indent, kind:'seq', line, item:{contentColumn,
-   * contentKind}} — contentColumn null until the item's content starts
-   * (inline `- key: v` sets it immediately; a bare `-` adopts the first
-   * deeper line's column). 'scalar' content fills the item: nothing deeper.
+   * Block-scope stack. Map entries: {indent, kind:'map', line,
+   * stepItem?} — stepItem marks the body map of a sequence item directly
+   * under 'steps:' (its keys are schema-checked). Seq entries additionally
+   * track the CURRENT item so deeper lines can be checked against it:
+   * {indent, kind:'seq', line, parentKey, item:{contentColumn,
+   * contentKind}} — parentKey is the mapping key the sequence hangs off
+   * ('steps', 'matrix', …; null at doc level or inside another item).
+   * contentColumn null until the item's content starts (inline
+   * `- key: v` sets it immediately; a bare `-` adopts the first deeper
+   * line's column). 'scalar' content fills the item: nothing deeper.
    */
   let stack = [];
   // Most recent mapping key line, and whether its value slot is filled.
@@ -229,8 +260,8 @@ export function lintWorkflow(text, name = "workflow") {
         // key state means this item dedented out of a deeper sequence and
         // landed on a mapping level — the run-32705244305 defect.
         if (pendingKey && pendingKey.indent === indent && !pendingKey.hasValue) {
-          stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) });
-          pendingKey = { indent, hasValue: true };
+          stack.push({ indent, kind: "seq", line: no, parentKey: pendingKey.key, item: itemFor(rest, inlineColumn) });
+          pendingKey = { indent, hasValue: true, key: pendingKey.key };
         } else {
           err(no,
             `sequence item '- ${((rest ?? "").split(":")[0] || "?").trim()}' at column ${indent} ` +
@@ -252,12 +283,12 @@ export function lintWorkflow(text, name = "workflow") {
         }
         it.contentColumn = indent;
         it.contentKind = "seq";
-        stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) });
+        stack.push({ indent, kind: "seq", line: no, parentKey: null, item: itemFor(rest, inlineColumn) });
       } else if (t && t.kind === "map") {
         // deeper than a mapping: must hang off its empty-value key
         if (pendingKey && pendingKey.indent === t.indent && !pendingKey.hasValue) {
-          stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) });
-          pendingKey = { indent: t.indent, hasValue: true };
+          stack.push({ indent, kind: "seq", line: no, parentKey: pendingKey.key, item: itemFor(rest, inlineColumn) });
+          pendingKey = { indent: t.indent, hasValue: true, key: pendingKey.key };
         } else {
           err(no, `sequence item at column ${indent} hangs off a mapping key that already has a value`);
           continue;
@@ -269,14 +300,17 @@ export function lintWorkflow(text, name = "workflow") {
           err(no, `sequence item at column ${indent} does not match the document root column ${docRootColumn}`);
           continue;
         }
-        stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) });
+        stack.push({ indent, kind: "seq", line: no, parentKey: null, item: itemFor(rest, inlineColumn) });
       }
       // inline mapping content (`- key: value`) opens the item's map now
       const entry = top();
       if (entry && entry.kind === "seq" && entry.item && entry.item.contentKind === "map") {
         const [k, v] = entry.item.key;
-        stack.push({ indent: entry.item.contentColumn, kind: "map", line: no });
-        pendingKey = { indent: entry.item.contentColumn, hasValue: v !== null && v !== "" };
+        stack.push({ indent: entry.item.contentColumn, kind: "map", line: no, stepItem: entry.parentKey === "steps" });
+        if (entry.parentKey === "steps" && !STEP_KEYS.has(k)) {
+          err(no, stepKeyError(k));
+        }
+        pendingKey = { indent: entry.item.contentColumn, hasValue: v !== null && v !== "", key: k };
         if (v !== null && /^[|>]/.test(v.trim())) scalar = { keyIndent: entry.item.contentColumn, base: null, line: no };
       }
       continue;
@@ -316,7 +350,7 @@ export function lintWorkflow(text, name = "workflow") {
         }
         it.contentColumn = indent;
         it.contentKind = "map";
-        stack.push({ indent, kind: "map", line: no });
+        stack.push({ indent, kind: "map", line: no, stepItem: t.parentKey === "steps" });
       } else {
         // doc level: the document root must keep ONE column
         if (docRootColumn === null) docRootColumn = indent;
@@ -327,8 +361,16 @@ export function lintWorkflow(text, name = "workflow") {
         stack.push({ indent, kind: "map", line: no });
       }
     }
-    // (top map at the same column: sibling key — always fine)
-    pendingKey = { indent, hasValue };
+    // (top map at the same column: sibling key — always fine structurally)
+    // Schema (run-32719897425): if that map is a steps-item body, the key
+    // must be one of GitHub's step keys — a dedented 'with:' input here is
+    // valid YAML but kills the whole file at GitHub's parser. Scope state
+    // stays sane (only the schema is wrong), so processing continues.
+    t = top();
+    if (t && t.kind === "map" && t.indent === indent && t.stepItem && !STEP_KEYS.has(key)) {
+      err(no, stepKeyError(key));
+    }
+    pendingKey = { indent, hasValue, key };
     lastPlainKey = hasValue && !/^[|>]/.test(trimmed) ? { indent } : null;
     if (hasValue && /^[|>]/.test(trimmed)) scalar = { keyIndent: indent, base: null, line: no };
   }
