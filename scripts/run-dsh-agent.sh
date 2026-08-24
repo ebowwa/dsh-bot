@@ -165,7 +165,14 @@ echo "::group::dsh agent (GLM-5.3 via Z.AI)" >&2
 if [ -n "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
   GH_BOT_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/gh-bot-config.$$"
   mkdir -p "$GH_BOT_DIR" && chmod 700 "$GH_BOT_DIR"
-  printf 'github.com:\n    oauth_token: %s\n    user: github-actions[bot]\n    git_protocol: https\n' "$GH_TOKEN" \
+  # Resolve the gh identity FROM THE TOKEN: a PAT must push as its owner
+  # (BOT_PAT exists so cross-repo tower tickets can push to targets like
+  # ebowwa/ANE — the factory write-probe proved the PAT CAN write there
+  # while agent pushes went 0/8, every one denied because this hardcode
+  # made every agent the installation bot). Only the github.token
+  # fallback actually IS the bot.
+  GH_USER="$(gh api user --jq .login 2>/dev/null || printf 'github-actions[bot]')"
+  printf 'github.com:\n    oauth_token: %s\n    user: %s\n    git_protocol: https\n' "$GH_TOKEN" "$GH_USER" \
     > "$GH_BOT_DIR/hosts.yml" && chmod 600 "$GH_BOT_DIR/hosts.yml"
   export GH_CONFIG_DIR="$GH_BOT_DIR"
 fi
