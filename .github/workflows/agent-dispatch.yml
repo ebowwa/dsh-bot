@@ -102,6 +102,6 @@ jobs:
           cp -R "${DSH_HOME_JOB}/sessions/." data/sessions/run-${{ github.run_id }}/
           # size discipline: keep the newest 100 transcripts
           ls -t data/sessions | tail -n +101 | xargs -r rm -rf
-          git add data/sessions
+          git add -f data/sessions
           git commit -qm "flight recorder: session ${{ github.run_id }} [skip ci]" || exit 0
           git push -q origin tower-state || echo "::warning::transcript push failed (best-effort)"
