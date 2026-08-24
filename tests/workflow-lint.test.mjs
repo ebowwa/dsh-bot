@@ -65,6 +65,33 @@ const FIXED = PREFIX + `      - name: Upload session transcript (flight recorder
           name: dsh-session-\${{ github.run_id }}
 `;
 
+// The run-32719897425 defect, distilled: 'if-no-files-found' dedented two
+// columns too shallow — a sibling of 'with:', i.e. an unknown key at the
+// STEP level. Valid block YAML (the structure lint of PR #11 passed this
+// exact file green on main), but GitHub rejects the whole workflow file at
+// parse ("Unexpected value 'if-no-files-found'", zero jobs, "workflow file
+// issue", every workflow_call dispatch 422s). PR #17 re-indented the key
+// into 'with:'; the schema rule makes sure the class cannot merge green
+// again — revert it and the tests below go red on exactly this text.
+const STEP_KEY_BROKEN = PREFIX + `      - name: Upload session transcript (flight recorder)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-session-\${{ github.run_id }}
+          retention-days: 14
+        if-no-files-found: warn
+`;
+
+// The PR #17 fix: the key at its 'with:' siblings' column (10).
+const STEP_KEY_FIXED = PREFIX + `      - name: Upload session transcript (flight recorder)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-session-\${{ github.run_id }}
+          retention-days: 14
+          if-no-files-found: warn
+`;
+
 test("the run-32705244305 defect is rejected: step item dedented onto the mapping level", () => {
   const errors = lintWorkflow(BROKEN, "agent-dispatch.yml");
   assert.ok(errors.length > 0, "the broken indentation must not lint clean");
@@ -329,6 +356,83 @@ jobs:
 `;
   const errors = lintWorkflow(broken, "wf");
   assert.ok(errors.length > 0, "indicator-initial debris must not lint clean");
+});
+
+test("the run-32719897425 defect is rejected: with: input dedented onto the step level", () => {
+  const errors = lintWorkflow(STEP_KEY_BROKEN, "agent-dispatch.yml");
+  assert.ok(errors.length > 0, "a with: input at step level must not lint clean");
+  assert.match(errors[0].message, /step key 'if-no-files-found'/);
+  assert.equal(errors[0].line, 18); // the dedented 'if-no-files-found: warn' line
+  // the structural rules of PR #11 had nothing to say about this file —
+  // the schema rule is the ONLY thing standing between it and a green
+  // merge (the blind spot that let 824811e through)
+  assert.equal(errors.length, 1, "no cascade: the schema error alone");
+});
+
+test("the PR #17 fix lints clean: if-no-files-found inside with:", () => {
+  assert.deepEqual(lintWorkflow(STEP_KEY_FIXED, "agent-dispatch.yml"), []);
+});
+
+test("the pre-fix structural lint was blind to the run-32719897425 defect (regression proof)", () => {
+  // Documents WHY the schema rule exists: PR #11's structure-only checks
+  // passed the exact content that made GitHub fail the whole file. Strip
+  // the schema rule (revert scripts/workflow-lint.mjs to 824811e) and the
+  // first test above fails — this one keeps the causal chain honest.
+  withFile(STEP_KEY_BROKEN, (f) => {
+    const r = runTool([f]);
+    assert.equal(r.status, 1, "the gate must reject the file that 422'd every dispatch");
+    assert.match(r.stderr, /step key 'if-no-files-found'/);
+  });
+});
+
+test("every documented step key stays green; a real key at the wrong level is rejected", () => {
+  const ok = `name: x
+on: push
+jobs:
+  j:
+    runs-on: [self-hosted, dsh]
+    steps:
+      - name: everything
+        id: full
+        if: always()
+        uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 5
+        with:
+          repository: example/repo
+        env:
+          A: b
+      - name: runner
+        run: echo hi
+        shell: bash
+        working-directory: .
+        env:
+          B: c
+`;
+  assert.deepEqual(lintWorkflow(ok), [], "the full documented step-key set must not be a false positive");
+
+  // 'runs-on' is a real workflow key — but a JOB key. At step level it is
+  // the same defect class as 'if-no-files-found': right key, wrong level.
+  const wrongLevel = ok.replace("        shell: bash", "        runs-on: ubuntu-latest\n        shell: bash");
+  const errors = lintWorkflow(wrongLevel, "wf");
+  assert.ok(errors.length > 0, "a job key at step level must not lint clean");
+  assert.match(errors[0].message, /step key 'runs-on'/);
+});
+
+test("with: inputs may carry any name (no schema false positives on action inputs)", () => {
+  const ok = `name: x
+on: push
+jobs:
+  j:
+    runs-on: [self-hosted, dsh]
+    steps:
+      - uses: actions/upload-artifact@v4
+        with:
+          if-no-files-found: warn
+          runs-on: anything
+          steps: even-this
+`;
+  assert.deepEqual(lintWorkflow(ok), []);
 });
 
 test("all shipped workflow files lint clean (revert guard)", () => {
