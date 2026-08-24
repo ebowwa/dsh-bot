@@ -188,6 +188,73 @@ jobs:
   assert.deepEqual(lintWorkflow(bare), []);
 });
 
+test("doc-level mixed columns are rejected (review finding 1 on PR #11)", () => {
+  // First content line indented +2: a real parser rejects ("expected
+  // '<document start>'"); the first lint revision opened a fresh doc scope
+  // at any column and passed it.
+  const keyVariant = `  name: gates
+
+on:
+  push:
+    branches: [main]
+jobs:
+  j:
+    runs-on: [self-hosted, dsh]
+`;
+  const errors = lintWorkflow(keyVariant, "wf");
+  assert.ok(errors.length > 0, "a doc rooted at column 2 with keys at column 0 must not lint clean");
+  assert.match(errors[0].message, /does not match the document root column/);
+
+  const seqVariant = `  - a
+- b
+`;
+  const seqErrors = lintWorkflow(seqVariant, "wf");
+  assert.ok(seqErrors.length > 0, "a root sequence at mixed columns must not lint clean");
+  assert.match(seqErrors[0].message, /does not match the document root column/);
+
+  // a consistently indented root is legal and stays green
+  assert.deepEqual(lintWorkflow(`  a: 1\n  b: 2\n`), []);
+});
+
+test("a dedent between a block scalar's key and base is rejected (review finding 2 on PR #11)", () => {
+  // echo three at column 11: between the run: key (8) and the scalar's
+  // fixed base (12). A real parser terminates the scalar there and rejects
+  // the file; the scalar must not stay opaque past its base.
+  const broken = `name: x
+on: push
+jobs:
+  j:
+    runs-on: [self-hosted, dsh]
+    steps:
+      - name: a
+        run: |
+            echo one
+            echo two
+           echo three
+`;
+  const errors = lintWorkflow(broken, "wf");
+  assert.ok(errors.length > 0, "a misindented run-body line must not lint clean");
+  assert.equal(errors[0].line, 11);
+  // the identical workflow with a consistent body stays green
+  const fixed = broken.replace("           echo three", "            echo three");
+  assert.deepEqual(lintWorkflow(fixed, "wf"), []);
+});
+
+test("plain multi-line scalar continuations are accepted (review finding 3 on PR #11)", () => {
+  // key: value folds across deeper non-key lines — valid YAML
+  const ok = `name: x
+jobs:
+  j:
+    steps:
+      - name: a
+        run: echo one
+          two three
+      - name: b
+        run: echo bye
+`;
+  assert.deepEqual(lintWorkflow(ok), []);
+});
+
 test("all shipped workflow files lint clean (revert guard)", () => {
   const names = readdirSync(WF_DIR).filter((n) => n.endsWith(".yml") || n.endsWith(".yaml"));
   assert.ok(names.length > 0, "expected shipped workflow files to exist");
@@ -203,6 +270,8 @@ test("gates.yml runs the structural lint over .yml and .yaml (revert guard)", ()
     "the 'Workflow YAML parses' step must run the structural linter");
   assert.match(gates, /-name '\*\.yml' -o -name '\*\.yaml'/,
     "GitHub accepts both workflow extensions; the lint glob must cover .yaml too");
+  assert.match(gates, /-print0/,
+    "workflow files must reach the linter null-delimited (whitespace-safe)");
 });
 
 test("the pre-fix gate (tab-only check) was blind to this defect (regression proof)", () => {

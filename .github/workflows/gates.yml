@@ -47,10 +47,14 @@ jobs:
         # "parses" only rejected tabs. The lint makes the gate honest.
         run: |
           set -euo pipefail
-          for f in $(find .github/workflows -maxdepth 1 \( -name '*.yml' -o -name '*.yaml' \) | sort); do
+          # null-delimited (whitespace-safe), evaluated once; both extensions
+          wfs=()
+          while IFS= read -r -d '' f; do wfs+=("$f"); done < <(find .github/workflows -maxdepth 1 \( -name '*.yml' -o -name '*.yaml' \) -print0)
+          [ "${#wfs[@]}" -gt 0 ] || { echo "no workflow files found" >&2; exit 1; }
+          for f in "${wfs[@]}"; do
             node -e "const fs=require('fs');const s=fs.readFileSync(process.argv[1],'utf8');if(/\t/.test(s))throw new Error('tab in '+process.argv[1])" "$f"
           done
-          node scripts/workflow-lint.mjs $(find .github/workflows -maxdepth 1 \( -name '*.yml' -o -name '*.yaml' \) | sort)
+          node scripts/workflow-lint.mjs "${wfs[@]}"
       - name: Unit tests
         # bare --test auto-discovers *.test.mjs (a directory argument is not
         # portable across the node versions on the runner lanes)

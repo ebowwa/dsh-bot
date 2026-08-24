@@ -22,7 +22,11 @@
 //     style) but may not collide with or float between open scopes;
 //   - nesting under a key/item that already has a value is an error;
 //   - no tab indentation.
-// Block scalars (run: |, runs-on: >-) are skipped as opaque text.
+// Block scalars (run: |, runs-on: >-) are opaque text once their base
+// indent is fixed by the first content line; a dedent to between the
+// header key's column and that base ends the scalar and is flagged.
+// Plain multi-line scalars (key: value folded across deeper non-key
+// lines) are accepted.
 
 import { readFileSync } from "node:fs";
 
@@ -60,8 +64,18 @@ export function lintWorkflow(text, name = "workflow") {
   // Most recent mapping key line, and whether its value slot is filled.
   // When a sequence opens under key K, K's slot is filled by that sequence.
   let pendingKey = null;
-  // Active block scalar: content = every following line deeper than keyIndent.
+  // Active block scalar {keyIndent, base}: the FIRST non-blank content line
+  // fixes `base`; deeper-or-equal lines are content. A non-blank line
+  // between keyIndent and base terminates the scalar (a real parser does
+  // the same) and re-enters structural processing, which then flags it.
   let scalar = null;
+  // Column of the first significant line of the document: every doc-level
+  // (stack-empty) line must share it — a root mapping/sequence at mixed
+  // columns is invalid block YAML (review finding on PR #11).
+  let docRootColumn = null;
+  // Most recent key line carrying an inline PLAIN (non-block) value: a
+  // deeper non-key line after it is a plain-scalar continuation (legal).
+  let lastPlainKey = null;
 
   const err = (line, message) => errors.push({ line, message: `${name}:${line}: ${message}` });
   const top = () => stack[stack.length - 1];
@@ -81,10 +95,18 @@ export function lintWorkflow(text, name = "workflow") {
     const raw = lines[i];
     const { indent, body } = splitIndent(raw);
 
-    // Block-scalar bodies are opaque text until a line dedents past the
-    // header key's column (blank lines belong to the scalar).
+    // Block-scalar handling: the first non-blank content line fixes `base`;
+    // blank lines and lines at >= base are content. Anything else ends the
+    // scalar — a dedent to between keyIndent and base re-enters structural
+    // processing below (a real parser rejects the file there), a dedent to
+    // keyIndent or less is the normal scalar end.
     if (scalar) {
-      if (body === "" || indent > scalar.keyIndent) continue;
+      if (body === "") continue;
+      if (scalar.base === null) {
+        scalar.base = indent;
+        continue;
+      }
+      if (indent >= scalar.base) continue;
       scalar = null; // this line re-enters normal processing below
     }
 
@@ -93,6 +115,8 @@ export function lintWorkflow(text, name = "workflow") {
     if (body === "---" || body === "...") { // document markers reset scope
       stack = [];
       pendingKey = null;
+      docRootColumn = null;
+      lastPlainKey = null;
       continue;
     }
     if (/^\s*\t/.test(raw)) {
@@ -103,6 +127,9 @@ export function lintWorkflow(text, name = "workflow") {
     const seqMatch = /^-(?:\s+(.*))?$/.exec(body);
     const kp = seqMatch ? null : keyParts(body);
     if (!seqMatch && !kp) {
+      // plain multi-line scalar continuation (review finding on PR #11):
+      // `key: value` folds across deeper lines that are not keys
+      if (lastPlainKey && indent > lastPlainKey.indent) continue;
       err(no, `line is neither a mapping key nor a sequence item: '${body.slice(0, 40)}'`);
       continue;
     }
@@ -111,6 +138,7 @@ export function lintWorkflow(text, name = "workflow") {
 
     if (seqMatch) {
       // ---- sequence item line ----
+      lastPlainKey = null; // structural line: no plain continuation carries past it
       const rest = seqMatch[1] ?? null;
       // column of the inline content (after "- "), if any
       const inlineColumn = rest === null ? null : indent + (body.length - rest.length);
@@ -158,7 +186,13 @@ export function lintWorkflow(text, name = "workflow") {
           continue;
         }
       } else {
-        stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) }); // doc level
+        // doc level: the document root must keep ONE column
+        if (docRootColumn === null) docRootColumn = indent;
+        else if (indent !== docRootColumn) {
+          err(no, `sequence item at column ${indent} does not match the document root column ${docRootColumn}`);
+          continue;
+        }
+        stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) });
       }
       // inline mapping content (`- key: value`) opens the item's map now
       const entry = top();
@@ -166,7 +200,7 @@ export function lintWorkflow(text, name = "workflow") {
         const [k, v] = entry.item.key;
         stack.push({ indent: entry.item.contentColumn, kind: "map", line: no });
         pendingKey = { indent: entry.item.contentColumn, hasValue: v !== null && v !== "" };
-        if (v !== null && /^[|>]/.test(v.trim())) scalar = { keyIndent: entry.item.contentColumn, line: no };
+        if (v !== null && /^[|>]/.test(v.trim())) scalar = { keyIndent: entry.item.contentColumn, base: null, line: no };
       }
       continue;
     }
@@ -207,12 +241,19 @@ export function lintWorkflow(text, name = "workflow") {
         it.contentKind = "map";
         stack.push({ indent, kind: "map", line: no });
       } else {
-        stack.push({ indent, kind: "map", line: no }); // doc level
+        // doc level: the document root must keep ONE column
+        if (docRootColumn === null) docRootColumn = indent;
+        else if (indent !== docRootColumn) {
+          err(no, `mapping key '${key}' at column ${indent} does not match the document root column ${docRootColumn}`);
+          continue;
+        }
+        stack.push({ indent, kind: "map", line: no });
       }
     }
     // (top map at the same column: sibling key — always fine)
     pendingKey = { indent, hasValue };
-    if (hasValue && /^[|>]/.test(trimmed)) scalar = { keyIndent: indent, line: no };
+    lastPlainKey = hasValue && !/^[|>]/.test(trimmed) ? { indent } : null;
+    if (hasValue && /^[|>]/.test(trimmed)) scalar = { keyIndent: indent, base: null, line: no };
   }
 
   return errors;
