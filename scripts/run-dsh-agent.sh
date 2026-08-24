@@ -94,7 +94,13 @@ fi
 if [ -n "${DSH_HOME:-}" ] || [ -n "${DSH_PERSISTENT_HOME:-}" ]; then
   export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 else
-  export DSH_HOME="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dsh-home.$$"
+  export DSH_HOME="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/dsh-home.$"
+  # Publish the job-scoped home to the workflow (flight recorder): the
+  # upload step cannot see this shell process exports, and $ is the
+  # script PID — unknowable outside. GITHUB_ENV carries it as DSH_HOME_JOB.
+  if [ -n "${GITHUB_ENV:-}" ]; then
+    echo "DSH_HOME_JOB=${DSH_HOME}" >> "$GITHUB_ENV"
+  fi
   JOB_SCOPED_HOME=1
 fi
 # Hostnames the scrubber redacts on output surfaces beyond the generic
