@@ -6,7 +6,8 @@
 // parsing (zero jobs, "workflow file issue"), every workflow_call
 // dispatch 422'd, and PR #10 re-indented it by hand. The gates.yml
 // "Workflow YAML parses" step only rejected tabs, so the broken file
-// merged GREEN. These tests fail without the fix: revert the linter, the
+// passed that check green (the drift check was red; gates alone waved it
+// through). These tests fail without the fix: revert the linter, the
 // gates wiring, or re-break the indentation and this suite goes red.
 
 import { test } from "node:test";
@@ -126,17 +127,82 @@ jobs:
   assert.deepEqual(lintWorkflow(ok), []);
 });
 
+test("a line landing BETWEEN item and content columns is rejected (review finding on PR #11)", () => {
+  // One column too deep (7, between item col 6 and content col 8) is
+  // invalid block YAML with the same parse-failure blast radius — the
+  // first lint revision silently accepted it as a fresh scope.
+  const itemBetween = `name: x
+jobs:
+  j:
+    steps:
+      - name: a
+        run: echo hi
+       - name: b
+`;
+  const errorsA = lintWorkflow(itemBetween, "wf");
+  assert.ok(errorsA.length > 0, "a between-columns sequence item must not lint clean");
+  assert.match(errorsA[0].message, /matches no open scope/);
+  assert.equal(errorsA[0].line, 7);
+
+  const keyBetween = `name: x
+jobs:
+  j:
+    steps:
+      - name: a
+        run: echo hi
+       uses: x
+`;
+  const errorsB = lintWorkflow(keyBetween, "wf");
+  assert.ok(errorsB.length > 0, "a between-columns mapping key must not lint clean");
+  assert.match(errorsB[0].message, /matches no open scope/);
+});
+
+test("legal nested sequences stay green (review finding on PR #11)", () => {
+  const ok = `name: x
+jobs:
+  j:
+    steps:
+      - name: setup
+        with:
+          matrix:
+            include:
+              - os: mac
+              - os: linux
+      - name: env
+        with:
+          args:
+            - one
+            - two
+`;
+  assert.deepEqual(lintWorkflow(ok), []);
+
+  // bare item whose content is a nested sequence
+  const bare = `name: x
+jobs:
+  j:
+    steps:
+      -
+        - plain
+        - items
+`;
+  assert.deepEqual(lintWorkflow(bare), []);
+});
+
 test("all shipped workflow files lint clean (revert guard)", () => {
-  for (const f of readdirSync(WF_DIR).filter((n) => n.endsWith(".yml"))) {
+  const names = readdirSync(WF_DIR).filter((n) => n.endsWith(".yml") || n.endsWith(".yaml"));
+  assert.ok(names.length > 0, "expected shipped workflow files to exist");
+  for (const f of names) {
     const errors = lintWorkflow(readFileSync(path.join(WF_DIR, f), "utf8"), f);
     assert.deepEqual(errors, [], `${f} must pass the structural lint`);
   }
 });
 
-test("gates.yml runs the structural lint (revert guard)", () => {
+test("gates.yml runs the structural lint over .yml and .yaml (revert guard)", () => {
   const gates = readFileSync(path.join(WF_DIR, "gates.yml"), "utf8");
   assert.match(gates, /node scripts\/workflow-lint\.mjs/,
     "the 'Workflow YAML parses' step must run the structural linter");
+  assert.match(gates, /-name '\*\.yml' -o -name '\*\.yaml'/,
+    "GitHub accepts both workflow extensions; the lint glob must cover .yaml too");
 });
 
 test("the pre-fix gate (tab-only check) was blind to this defect (regression proof)", () => {

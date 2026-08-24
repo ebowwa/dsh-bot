@@ -6,17 +6,21 @@
 // 6 — a sequence item dedenting onto the mapping level. GitHub could not
 // parse the file ("workflow file issue", zero jobs started) and every
 // workflow_call dispatch 422'd until PR #10 re-indented it by hand. The
-// gates.yml "Workflow YAML parses" step only rejected tabs, so the broken
-// file merged green; this tool closes that hole.
+// gates.yml "Workflow YAML parses" step only rejected tabs, so the file
+// passed that check green (the drift check was red; gates alone waved it
+// through); this tool closes that hole.
 //
 // What it checks (block-structure subset — enough to catch the defect
 // class without reimplementing a YAML parser):
-//   - every sequence item ('- ...') hangs off an empty-value mapping key
-//     (the key that opened its sequence), at ONE consistent indent column;
-//   - a sequence item may sit at its key's own column (the legal
-//     'steps:\n- name:' style) but never dedents onto a mapping level that
-//     already holds keys or a filled value;
-//   - mapping keys do not nest under keys that already have a value;
+//   - a sequence item either sits at its sequence's item column, or is the
+//     fresh content of a bare parent item, or hangs off an empty-value
+//     mapping key — anything else (dedenting onto a mapping level, or
+//     landing at a column BETWEEN the item column and the content column)
+//     is an error: one-column-off misindents must not merge green either;
+//   - mapping keys live at their mapping's column; a key may close a
+//     sequence and join the map below it (the legal 'steps:\n- x\nnext:'
+//     style) but may not collide with or float between open scopes;
+//   - nesting under a key/item that already has a value is an error;
 //   - no tab indentation.
 // Block scalars (run: |, runs-on: >-) are skipped as opaque text.
 
@@ -26,6 +30,12 @@ import { readFileSync } from "node:fs";
 const splitIndent = (raw) => {
   const m = /^ */.exec(raw)[0];
   return { indent: m.length, body: raw.slice(m.length) };
+};
+
+/** Does body look like `key:` / `key: value`? Returns [key, value|null]. */
+const keyParts = (body) => {
+  const m = /^([^:#\s][^:]*?):(?:\s+(.*))?$/.exec(body);
+  return m ? [m[1], m[2] ?? null] : null;
 };
 
 /**
@@ -38,7 +48,14 @@ export function lintWorkflow(text, name = "workflow") {
   const errors = [];
   const lines = text.split(/\r?\n/);
 
-  /** @type {{indent: number, kind: "map"|"seq", line: number}[]} */
+  /**
+   * Block-scope stack. Map entries: {indent, kind:'map', line}.
+   * Seq entries additionally track the CURRENT item so deeper lines can be
+   * checked against it: {indent, kind:'seq', line, item:{contentColumn,
+   * contentKind}} — contentColumn null until the item's content starts
+   * (inline `- key: v` sets it immediately; a bare `-` adopts the first
+   * deeper line's column). 'scalar' content fills the item: nothing deeper.
+   */
   let stack = [];
   // Most recent mapping key line, and whether its value slot is filled.
   // When a sequence opens under key K, K's slot is filled by that sequence.
@@ -47,6 +64,17 @@ export function lintWorkflow(text, name = "workflow") {
   let scalar = null;
 
   const err = (line, message) => errors.push({ line, message: `${name}:${line}: ${message}` });
+  const top = () => stack[stack.length - 1];
+
+  // Register an inline item body (`- key: v`, `- scalar`, or bare `-`).
+  // Returns the seq entry's item state.
+  const itemFor = (rest, inlineColumn) => {
+    if (rest === null || rest === undefined) return { contentColumn: null, contentKind: null };
+    const kp = keyParts(rest);
+    if (kp) return { contentColumn: inlineColumn, contentKind: "map", key: kp };
+    if (rest.startsWith("-")) return { contentColumn: inlineColumn, contentKind: "seq" };
+    return { contentColumn: inlineColumn, contentKind: "scalar" };
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const no = i + 1;
@@ -73,78 +101,118 @@ export function lintWorkflow(text, name = "workflow") {
     }
 
     const seqMatch = /^-(?:\s+(.*))?$/.exec(body);
-    const keyMatch = seqMatch ? null : /^([^:#\s][^:]*?):(?:\s+(.*))?$/.exec(body);
+    const kp = seqMatch ? null : keyParts(body);
+    if (!seqMatch && !kp) {
+      err(no, `line is neither a mapping key nor a sequence item: '${body.slice(0, 40)}'`);
+      continue;
+    }
+
+    while (stack.length && indent < top().indent) stack.pop();
 
     if (seqMatch) {
       // ---- sequence item line ----
-      while (stack.length && indent < stack[stack.length - 1].indent) stack.pop();
-      const top = stack[stack.length - 1];
-      if (top && top.kind === "seq" && top.indent === indent) {
-        // sibling item of the open sequence — the one legal case
-      } else if (top && top.kind === "map" && top.indent === indent) {
+      const rest = seqMatch[1] ?? null;
+      // column of the inline content (after "- "), if any
+      const inlineColumn = rest === null ? null : indent + (body.length - rest.length);
+      let t = top();
+      if (t && t.kind === "seq" && t.indent === indent) {
+        // sibling item of the open sequence — resets the current item
+        t.item = itemFor(rest, inlineColumn);
+      } else if (t && t.kind === "map" && t.indent === indent) {
         // '- item' at a mapping key's own column: legal ONLY as the value
         // of the key that just opened (steps:\n- name: ...). Any other
         // key state means this item dedented out of a deeper sequence and
         // landed on a mapping level — the run-32705244305 defect.
         if (pendingKey && pendingKey.indent === indent && !pendingKey.hasValue) {
-          stack.push({ indent, kind: "seq", line: no });
+          stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) });
           pendingKey = { indent, hasValue: true };
         } else {
           err(no,
-            `sequence item '- ${((seqMatch[1] ?? "").split(":")[0] || "?").trim()}' at column ${indent} ` +
+            `sequence item '- ${((rest ?? "").split(":")[0] || "?").trim()}' at column ${indent} ` +
             `dedents onto a mapping level — all items of one sequence must share one indent column ` +
             `(run-32705244305 defect class: the workflow file stops parsing and every dispatch 422s)`);
+          continue;
         }
-      } else if (!top || top.indent < indent) {
-        // opens a (nested) sequence; under a mapping it must hang off an
-        // empty-value key of that mapping
-        if (top && top.kind === "map" &&
-            !(pendingKey && pendingKey.indent === top.indent && !pendingKey.hasValue)) {
+      } else if (t && t.kind === "seq") {
+        // deeper than the open sequence's item column: only legal as the
+        // FIRST content of that sequence's bare current item
+        const it = t.item;
+        if (!it || it.contentColumn !== null) {
+          const where = it && it.contentColumn !== null
+            ? ` (item column ${t.indent}, content column ${it.contentColumn})` : "";
           err(no,
-            `sequence item at column ${indent} hangs off a mapping key that already has a value`);
-        } else {
-          stack.push({ indent, kind: "seq", line: no });
-          if (top && top.kind === "map") pendingKey = { indent: top.indent, hasValue: true };
+            `sequence item at column ${indent} matches no open scope${where} — ` +
+            `a misindent between or beyond a sequence's columns is invalid block YAML`);
+          continue;
         }
-      } else if (top && top.kind === "seq" && top.indent > indent) {
-        err(no, `sequence item at column ${indent} is shallower than its sequence (opened line ${top.line})`);
+        it.contentColumn = indent;
+        it.contentKind = "seq";
+        stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) });
+      } else if (t && t.kind === "map") {
+        // deeper than a mapping: must hang off its empty-value key
+        if (pendingKey && pendingKey.indent === t.indent && !pendingKey.hasValue) {
+          stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) });
+          pendingKey = { indent: t.indent, hasValue: true };
+        } else {
+          err(no, `sequence item at column ${indent} hangs off a mapping key that already has a value`);
+          continue;
+        }
+      } else {
+        stack.push({ indent, kind: "seq", line: no, item: itemFor(rest, inlineColumn) }); // doc level
+      }
+      // inline mapping content (`- key: value`) opens the item's map now
+      const entry = top();
+      if (entry && entry.kind === "seq" && entry.item && entry.item.contentKind === "map") {
+        const [k, v] = entry.item.key;
+        stack.push({ indent: entry.item.contentColumn, kind: "map", line: no });
+        pendingKey = { indent: entry.item.contentColumn, hasValue: v !== null && v !== "" };
+        if (v !== null && /^[|>]/.test(v.trim())) scalar = { keyIndent: entry.item.contentColumn, line: no };
       }
       continue;
     }
 
-    if (keyMatch) {
-      // ---- mapping key line ----
-      while (stack.length && indent < stack[stack.length - 1].indent) stack.pop();
-      let top = stack[stack.length - 1];
+    // ---- mapping key line ----
+    const [key, value] = kp;
+    const trimmed = (value ?? "").trim();
+    const hasValue = trimmed !== "" && !trimmed.startsWith("#");
+    let t = top();
+    if (t && t.kind === "seq" && t.indent === indent) {
       // a key at a sequence's item column closes that sequence and joins
-      // the mapping below it (legal 'steps:\n- x\nnext-key:' style)
-      if (top && top.kind === "seq" && top.indent === indent) {
-        stack.pop();
-        top = stack[stack.length - 1];
-      }
-      if (top && top.kind === "seq" && top.indent === indent) {
-        err(no, `mapping key at column ${indent} collides with a sequence item column`);
+      // the mapping below it — legal ONLY if that mapping owns the column
+      stack.pop();
+      t = top();
+      if (!t || t.kind !== "map" || t.indent !== indent) {
+        err(no, `mapping key '${key}' at column ${indent} closes a sequence but no mapping owns that column`);
         continue;
       }
-      const value = (keyMatch[2] ?? "").trim();
-      const hasValue = value !== "" && !value.startsWith("#");
-      if (!top || top.indent < indent) {
-        // nested mapping — must open under an empty-value key
-        if (top && top.kind === "map" &&
-            !(pendingKey && pendingKey.indent === top.indent && !pendingKey.hasValue)) {
-          err(no,
-            `mapping key '${keyMatch[1]}' at column ${indent} nests under a key that already has a value`);
+    }
+    if (!t || t.indent < indent) {
+      if (t && t.kind === "map") {
+        if (!(pendingKey && pendingKey.indent === t.indent && !pendingKey.hasValue)) {
+          err(no, `mapping key '${key}' at column ${indent} nests under a key that already has a value`);
           continue;
         }
         stack.push({ indent, kind: "map", line: no });
+      } else if (t && t.kind === "seq") {
+        // deeper than the item column: only legal as the FIRST content of
+        // the sequence's bare current item
+        const it = t.item;
+        if (!it || it.contentColumn !== null) {
+          const where = it && it.contentColumn !== null
+            ? ` (item column ${t.indent}, content column ${it.contentColumn})` : "";
+          err(no, `mapping key '${key}' at column ${indent} matches no open scope${where}`);
+          continue;
+        }
+        it.contentColumn = indent;
+        it.contentKind = "map";
+        stack.push({ indent, kind: "map", line: no });
+      } else {
+        stack.push({ indent, kind: "map", line: no }); // doc level
       }
-      // (top map at the same column: sibling key — always fine)
-      pendingKey = { indent, hasValue };
-      if (/^[|>]/.test(value)) scalar = { keyIndent: indent, line: no };
-      continue;
     }
-
-    err(no, `line is neither a mapping key nor a sequence item: '${body.slice(0, 40)}'`);
+    // (top map at the same column: sibling key — always fine)
+    pendingKey = { indent, hasValue };
+    if (hasValue && /^[|>]/.test(trimmed)) scalar = { keyIndent: indent, line: no };
   }
 
   return errors;
