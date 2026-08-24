@@ -76,17 +76,32 @@ jobs:
             | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" \
             | tee "$RUNNER_TEMP/dsh-agent-output.txt"
 
-      # FLIGHT RECORDER: archive the full session transcript (every
-      # reasoning chunk, tool call, and result — the complete generation,
-      # not the summary) so agent work is auditable. DSH_HOME_JOB is
-      # published by run-dsh-agent.sh via GITHUB_ENV (the job-scoped
-      # home; its PID-based dirname is unknowable outside the script).
-      # Runs on failure too — a failed run's transcript matters most.
-      - name: Upload session transcript (flight recorder)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dsh-session-${{ github.run_id }}
-          path: ${{ env.DSH_HOME_JOB }}/sessions/
-          retention-days: 14
-          if-no-files-found: warn
+      # FLIGHT RECORDER: the full session transcript (every reasoning
+      # chunk, tool call, result — the complete generation, not the
+      # summary) goes to the tower-state branch under data/sessions/ —
+      # the same shared-memory ref as the ledger. Artifact storage hit
+      # the org quota on its FIRST upload (2026-08-24); branch storage
+      # is the fleet's existing memory pattern. Best-effort: never
+      # fails the agent run.
+      - name: Archive session transcript (flight recorder)
+        if: always() && env.DSH_HOME_JOB != ''
+        env:
+          GH_TOKEN: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
+        run: |
+          set -euo pipefail
+          [ -d "${DSH_HOME_JOB}/sessions" ] || { echo "no sessions dir"; exit 0; }
+          WORK=$(mktemp -d)
+          cd "$WORK"
+          git init -q .
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git fetch -q origin tower-state || true
+          git checkout -q -B tower-state origin/tower-state 2>/dev/null || git checkout -q -B tower-state
+          mkdir -p data/sessions
+          cp -R "${DSH_HOME_JOB}/sessions/." data/sessions/run-${{ github.run_id }}/
+          # size discipline: keep the newest 100 transcripts
+          ls -t data/sessions | tail -n +101 | xargs -r rm -rf
+          git add data/sessions
+          git commit -qm "flight recorder: session ${{ github.run_id }} [skip ci]" || exit 0
+          git push -q origin tower-state || echo "::warning::transcript push failed (best-effort)"
