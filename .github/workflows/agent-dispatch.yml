@@ -83,6 +83,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dsh-session-${{ github.run_id }}
-          path: ${{ env.DSH_HOME }}/sessions/
+          # The agent script scopes DSH_HOME to a job-local dir under
+        # RUNNER_TEMP (atomic cleanup); env.DSH_HOME is NOT set in this
+        # step's context (observed: path collapsed to '/sessions/' and the
+        # recorder uploaded nothing, run 32705314456). Point at the real
+        # job-scoped home directly.
+        path: ${{ runner.temp }}/dsh-home-${{ github.run_id }}-${{ github.run_attempt }}/sessions/
           retention-days: 14
           if-no-files-found: ignore
