@@ -71,17 +71,18 @@ jobs:
             | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" \
             | tee "$RUNNER_TEMP/dsh-agent-output.txt"
 
-    # FLIGHT RECORDER: archive the full session transcript (every reasoning
-    # chunk, tool call, and result — the complete generation, not the summary)
-    # so agent work is auditable. Scrubbed name only; the transcript itself
-    # never contains secrets (the scrubber guards the stream; credentials
-    # live in env, stripped from child processes). runs-on failure too —
-    # a failed agent's transcript is the most valuable one.
-    - name: Upload session transcript (flight recorder)
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: dsh-session-${{ github.run_id }}
-        path: ${{ env.DSH_HOME }}/sessions/
-        retention-days: 14
-        if-no-files-found: ignore
+      # FLIGHT RECORDER: archive the full session transcript (every reasoning
+      # chunk, tool call, and result — the complete generation, not the
+      # summary) so agent work is auditable. Scrubbed name only; the
+      # transcript itself never contains secrets (the scrubber guards the
+      # stream; credentials live in env, stripped from child processes).
+      # Runs on failure too — a failed agent's transcript is the most
+      # valuable one.
+      - name: Upload session transcript (flight recorder)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-session-${{ github.run_id }}
+          path: ${{ env.DSH_HOME }}/sessions/
+          retention-days: 14
+          if-no-files-found: ignore
