@@ -227,6 +227,14 @@ test("DSH_SUBAGENT_MODEL=zai/glm-5.2 patches BOTH tool-subagent instances", () =
   rmSync(dir, { recursive: true, force: true });
   assert.equal(out.status, 0, `valid value must succeed, stderr: ${out.stderr}`);
   assert.match(out.stderr, /subagent model: zai\/glm-5\.2 .*main stays zai\/glm-5\.3/);
+  // The FIRST LINE is the managed marker: residue recovery (a killed run
+  // never reaches the exit cleanup) keys off it — replace on a set run,
+  // remove on an unset run — while marker-less files stay hand-placed.
+  assert.match(
+    out.patch.split("\n")[0],
+    /^# managed-by: dsh-bot run-dsh-agent\.sh \(DSH_SUBAGENT_MODEL per-run overlay\)$/,
+    "first line must be the managed marker exactly",
+  );
   assert.match(out.patch, /id: tool-subagent$/m, "spawn instance (the subagent tool) overridden");
   assert.match(out.patch, /id: tool-subagent-fork$/m, "fork instance (subagent_fork) overridden");
   assert.match(out.patch, /provider: zai\n {6}model: glm-5\.2/, "agentOptions carry the split ids");
@@ -345,7 +353,7 @@ test("the full launcher puts the patch in place BEFORE dsh starts (call-site ord
   assert.match(proc.stdout, /PATCH-BEGIN[\s\S]*id: tool-subagent-fork[\s\S]*PATCH-END/, "the patch file existed when the agent launched");
 });
 
-test("the per-run patch is removed after the run on a persistent/explicit home (works more than once per home)", () => {
+test("the per-run patch is removed after the run on a persistent/explicit home (set-after-set AND unset-after-set sequences)", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "dsh-submodel-cleanup-"));
   const bin = path.join(dir, "bin");
   mkdirSync(bin);
@@ -394,6 +402,84 @@ test("the per-run patch is removed after the run on a persistent/explicit home (
   const run2 = spawnSync("bash", [SCRIPT, "integration test task 2"], { encoding: "utf8", env, timeout: 60_000 });
   assert.equal(run2.status, 0, `second run with the input set must succeed (was: clobber-refusal exit 2), stderr tail: ${run2.stderr.slice(-400)}`);
   assert.ok(!existsSync(path.join(home, "cordis.patch.yml")), "no residue after the second run either");
+
+  // The unset-after-set sequence (review r2, finding 2): a later run
+  // against the same home with the input UNSET must not compose the
+  // previous run's override — composition triggers on the FILE's
+  // presence alone, so "no file" IS the "empty = inherit the run model"
+  // contract, and no override line may be logged.
+  const envUnset = { ...env };
+  delete envUnset.DSH_SUBAGENT_MODEL;
+  const run3 = spawnSync("bash", [SCRIPT, "integration test task 3"], { encoding: "utf8", env: envUnset, timeout: 60_000 });
+  assert.equal(run3.status, 0, `unset run must succeed, stderr tail: ${run3.stderr.slice(-400)}`);
+  assert.doesNotMatch(run3.stderr, /subagent model:/, "an unset run must not log an override — the stale model must not apply");
+  assert.ok(!existsSync(path.join(home, "cordis.patch.yml")), "still no residue after the unset run");
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// Killed-run residue (review r2, finding 2): when a run is killed before
+// the exit cleanup fires, the patch survives on a persistent/explicit
+// home. The managed first-line marker must let the NEXT run recover —
+// replace it on a set run (was: permanent clobber-refusal exit 2 on that
+// home), remove it on an unset run (was: children silently riding the
+// stale model). A marker-LESS file stays hand-placed: refused (set run)
+// and untouched (unset run).
+test("killed-run residue carrying the managed marker is recovered: replaced on a set run, removed on an unset run", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-submodel-residue-"));
+  const bin = path.join(dir, "bin");
+  mkdirSync(bin);
+  writeFileSync(
+    path.join(bin, "dsh"),
+    [
+      "#!/bin/sh",
+      'case "$1" in --version) echo "dsh-stub-0.0.0" >&2; exit 0;; esac',
+      "echo STUB-FINAL-ANSWER",
+    ].join("\n") + "\n",
+  );
+  writeFileSync(path.join(bin, "doppler"), "#!/bin/sh\nshift; shift; shift; shift\nexec \"$@\"\n");
+  writeFileSync(path.join(bin, "zstd"), "#!/bin/sh\nexit 0\n");
+  for (const f of readdirSync(bin)) spawnSync("chmod", ["+x", path.join(bin, f)]);
+
+  const home = path.join(dir, "home");
+  const baseEnv = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: dir,
+    DSH_HOME: home,
+    DOPPLER_SERVICE_TOKEN: "stub-token",
+    DSH_KEEP_SESSIONS: "",
+  };
+  delete baseEnv.GH_TOKEN;
+  delete baseEnv.GITHUB_ENV;
+  delete baseEnv.DSH_PERSISTENT_HOME;
+  delete baseEnv.DSH_SESSION_PATH_FILE;
+
+  // (a) input SET over our own residue: the marker makes it replaceable —
+  // one killed run used to permanently break every later set-input run.
+  const residue = runPatchFn({ home, value: "zai/glm-5.2" }); // the "killed run": file written, cleanup never fires
+  assert.equal(residue.status, 0, `residue write failed: ${residue.stderr}`);
+  assert.ok(existsSync(path.join(home, "cordis.patch.yml")), "residue in place (simulated killed run)");
+  const setRun = spawnSync("bash", [SCRIPT, "integration test task"], {
+    encoding: "utf8",
+    env: { ...baseEnv, DSH_SUBAGENT_MODEL: "zai/glm-5.2" },
+    timeout: 60_000,
+  });
+  assert.equal(setRun.status, 0, `set run over own residue must succeed (was: clobber-refusal exit 2), stderr tail: ${setRun.stderr.slice(-400)}`);
+  assert.match(setRun.stderr, /replacing [^\n]*cordis\.patch\.yml left by an earlier killed run/, "the replacement must be logged");
+  assert.ok(!existsSync(path.join(home, "cordis.patch.yml")), "exit cleanup still removes the rewritten patch");
+
+  // (b) input UNSET over our own residue: the marker makes it removable —
+  // without this, the children of THIS run silently ride the stale model.
+  const residue2 = runPatchFn({ home, value: "zai/glm-5.2" });
+  assert.equal(residue2.status, 0, `second residue write failed: ${residue2.stderr}`);
+  assert.ok(existsSync(path.join(home, "cordis.patch.yml")), "second residue in place");
+  const unsetEnv = { ...baseEnv };
+  delete unsetEnv.DSH_SUBAGENT_MODEL;
+  const unsetRun = spawnSync("bash", [SCRIPT, "integration test task 2"], { encoding: "utf8", env: unsetEnv, timeout: 60_000 });
+  assert.equal(unsetRun.status, 0, `unset run over own residue must succeed, stderr tail: ${unsetRun.stderr.slice(-400)}`);
+  assert.match(unsetRun.stderr, /removed [^\n]*cordis\.patch\.yml left by an earlier killed run/, "the residue removal must be logged");
+  assert.ok(!existsSync(path.join(home, "cordis.patch.yml")), "the residue must be gone — this run's children inherit the run model again");
 
   rmSync(dir, { recursive: true, force: true });
 });
@@ -508,4 +594,59 @@ test("the composed plugin tree actually loads: dsh boots against the generated p
     /\$\.provider missing required value/,
     "dsh-tool-subagent's zod schema must be satisfied: base keys survived the patch",
   );
+});
+
+// --- 7. the MAIN AGENT stays on the run model (real dsh boot) -----------
+//
+// Review r2 finding 4: no test pinned the OTHER half of the change — the
+// main agent must ride the SETTINGS model (agent-default-model from
+// settings.yaml), not the subagent override. Boot is the observable: with
+// settings.yaml naming zai/glm-5.3 and the patch overriding children to a
+// DIFFERENT provider (opencode-go2), credential resolution must name the
+// SETTINGS route ("zai") — if the patch had leaked into the main agent's
+// model, the error would name opencode-go2 instead. This is also the
+// runtime proof that settings.yaml applies to the booted tree (the dump
+// cannot show it: it prints layer views without resolving them). Skipped
+// when the dsh CLI is absent.
+test("the main agent stays on the settings model: boot resolves the SETTINGS provider route, not the subagent override (review r2 finding 4)", () => {
+  const dshBin = spawnSync("bash", ["-c", "command -v dsh"], { encoding: "utf8" }).stdout?.trim();
+  if (!dshBin) return; // tolerate lanes without the CLI
+
+  const home = mkdtempSync(path.join(tmpdir(), "dsh-submodel-mainstay-"));
+  // Children overridden to a provider DIFFERENT from settings' zai so the
+  // two halves are distinguishable in the credential-resolution error.
+  const out = runPatchFn({ home, value: "opencode-go2/deepseek-v4-flash" });
+  assert.equal(out.status, 0, `patch write failed: ${out.stderr}`);
+  // settings.yaml: exactly what the launcher installs from the template —
+  // agent-default-model zai/glm-5.3 + the zai provider route.
+  writeFileSync(path.join(home, "settings.yaml"), readFileSync(path.join(ROOT, "config", "settings.zai.yaml")));
+
+  const cwd = mkdtempSync(path.join(tmpdir(), "dsh-submodel-maincwd-"));
+  // Strip every plausible inference credential: the run must die at
+  // credential resolution (fast, offline), never place a live call.
+  const env = { ...process.env, DSH_HOME: home };
+  for (const k of ["ZAI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN"]) delete env[k];
+  const boot = spawnSync(dshBin, ["--profile", "headless", "reply ok"], {
+    encoding: "utf8",
+    timeout: 120_000,
+    cwd,
+    env,
+  });
+  rmSync(home, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true });
+
+  assert.notEqual(boot.status, null, "the boot probe must terminate, not hang");
+  const combined = `${boot.stdout}\n${boot.stderr}`;
+  assert.match(combined, /MISSING_CREDENTIAL/, "the boot must reach credential resolution — proving settings.yaml applies at runtime");
+  assert.match(
+    combined,
+    /provider route "zai"/,
+    "the MAIN agent resolves its model from settings.yaml (zai/glm-5.3) — the run model, not the override",
+  );
+  assert.doesNotMatch(
+    combined,
+    /provider route "opencode-go2"/,
+    "the subagent override must not become the main agent's route — that would be this half broken",
+  );
+  assert.doesNotMatch(combined, /plugin tree failed to load/, "the patched plugin tree must still load");
 });

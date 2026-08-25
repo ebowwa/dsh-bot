@@ -153,10 +153,27 @@ fi
 # -path plugin that could not resolve @deepseek-ai deps), no plugin is
 # loaded from outside the bundles, so no dependency resolution is
 # involved. Unset/empty = no patch file = children inherit (today's
-# behavior). A hand-placed patch file is REFUSED, never clobbered.
+# behavior). The file's FIRST LINE is the managed marker: residue from a
+# killed run (exit cleanup never fired) is recognized and replaced (input
+# set) or removed (input unset), while a hand-placed overlay WITHOUT the
+# marker is REFUSED, never clobbered.
 #   DSH_SUBAGENT_MODEL=zai/glm-5.2
 write_subagent_model_patch() {
-  [ -n "${DSH_SUBAGENT_MODEL:-}" ] || return 0
+  local managed_marker="# managed-by: dsh-bot run-dsh-agent.sh (DSH_SUBAGENT_MODEL per-run overlay)"
+  local patch_file="$DSH_HOME/cordis.patch.yml"
+  if [ -z "${DSH_SUBAGENT_MODEL:-}" ]; then
+    # Unset = inherit the run model (the input's documented contract).
+    # Composition triggers on the FILE's presence alone, so a leftover
+    # from a killed run would silently misroute this run's children;
+    # recover by removing it. A file lacking the marker is operator
+    # state: leave it untouched (this run asked for no override, not for
+    # deleting the operator's overlay).
+    if [ -e "$patch_file" ] && [ "$(head -n1 "$patch_file" 2>/dev/null || true)" = "$managed_marker" ]; then
+      rm -f "$patch_file"
+      echo "note: removed $patch_file left by an earlier killed run (input unset — children inherit the run model)" >&2
+    fi
+    return 0
+  fi
   # Validation is charset+shape, not mere slash-presence: the value becomes
   # STRUCTURED YAML (two config maps), so a newline can inject sibling keys,
   # a `#` comments out the overlay, a `:` reinterprets a scalar. A glob case
@@ -181,13 +198,20 @@ write_subagent_model_patch() {
   esac
   local sub_provider="${DSH_SUBAGENT_MODEL%/*}"
   local sub_model="${DSH_SUBAGENT_MODEL#*/}"
-  local patch_file="$DSH_HOME/cordis.patch.yml"
   # The home may not exist yet at this point (the setup group below runs
   # later) — mint it; the job-scoped home cleanup already tolerates that.
   mkdir -p "$DSH_HOME"
   if [ -e "$patch_file" ]; then
-    echo "error: $patch_file already exists; refusing to clobber a hand-placed overlay — merge the agentOptions entries by hand" >&2
-    return 2
+    if [ "$(head -n1 "$patch_file" 2>/dev/null || true)" = "$managed_marker" ]; then
+      # Our own residue — a killed run never reached the exit cleanup. The
+      # file is derived state, fully reproducible from this input, so
+      # replacing it is safe; without the marker check, one killed run
+      # permanently broke every later set-input run on this home.
+      echo "note: replacing $patch_file left by an earlier killed run (managed marker present)" >&2
+    else
+      echo "error: $patch_file already exists without the managed marker; refusing to clobber a hand-placed overlay — merge the agentOptions entries by hand" >&2
+      return 2
+    fi
   fi
   # A patch entry with the same plugin id REPLACES the whole config map —
   # dsh does NOT deep-merge patches into the base layer. Repeating the
@@ -199,7 +223,8 @@ write_subagent_model_patch() {
   # boots the real profile against exactly this file — if a dsh release
   # changes these base keys, that test is what goes red.
   cat > "$patch_file" <<PATCH
-# per-run overlay (DSH_SUBAGENT_MODEL): subagent children on $DSH_SUBAGENT_MODEL
+$managed_marker
+# subagent children on $DSH_SUBAGENT_MODEL; main agent stays $EFFECTIVE_MODEL
 # config maps REPLACE per id — base keys are carried through, not merged.
 - id: tool-subagent
   config:
@@ -396,7 +421,10 @@ fi
 # anyway). Unlike transcripts (DSH_KEEP_SESSIONS), the patch is derived
 # state: fully reproducible from DSH_SUBAGENT_MODEL, and a survivor
 # composes into every later run against that home — silently at first,
-# then as a clobber-refusal exit 2 on the next explicit override.
+# then as a clobber-refusal exit 2 on the next explicit override. If the
+# process dies BEFORE this point (killed run), the managed first-line
+# marker lets the next run recover: replaced when the input is set,
+# removed when it is unset (write_subagent_model_patch).
 if [ "${SUBAGENT_PATCH_WRITTEN:-0}" = "1" ]; then
   rm -f "${DSH_HOME:-}/cordis.patch.yml" 2>/dev/null || true
 fi
