@@ -28,6 +28,15 @@
 #   GH_TOKEN        must be a PAT with issue/PR comment write access (BOT_PAT)
 
 set -euo pipefail
+# Linux runner services can start jobs WITHOUT $HOME in env (observed
+# 2026-08-25: seed-secondsee review died "Unable to determine home
+# directory" -> Doppler "$HOME is not defined" -> no ZAI_API_KEY ->
+# unbound session_file at exit). mac cells always carry it; make the
+# script indifferent: derive HOME from the passwd entry when unset.
+if [ -z "${HOME:-}" ]; then
+  HOME="$(getent passwd "$(id -u)" | cut -d: -f6 || true)"
+  [ -n "$HOME" ] && export HOME || { echo "::error::no $HOME and no passwd entry — cannot run" >&2; exit 1; }
+fi
 
 # Fallback task for scheduled runs (workflow_dispatch provides a real task).
 DEFAULT_TASK="${DEFAULT_TASK:-Routine maintenance task: check this repository for issues labeled agent-todo, pick the highest-priority one, and if the fix is clear, implement it, test it, and open a pull request. Otherwise report what you found.}"
