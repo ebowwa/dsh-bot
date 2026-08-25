@@ -1,0 +1,5 @@
+# dsh-bot tool overlay — mounted by run-dsh-agent.sh via --patch.
+# Adds the composition search tool (see plugins/tool-search-compose).
+- insert:
+    - id: tool-search-compose
+      name: ./plugins/tool-search-compose/index.js
