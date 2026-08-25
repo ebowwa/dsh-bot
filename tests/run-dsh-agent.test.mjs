@@ -185,3 +185,168 @@ test("run-dsh-agent.sh parses (bash -n)", () => {
   assert.equal(spawnSync("bash", ["-n", SCRIPT]).status, 0);
   assert.ok(existsSync(SCRIPT));
 });
+
+// --- 4. DSH_SUBAGENT_MODEL: the home-level patch that routes children ---
+
+// Extracted-function runner: bash -euo pipefail with DSH_HOME/DSH_SUBAGENT_MODEL
+// from a case table entry. Returns {status, stderr, patch}.
+const runPatchFn = ({ home, value }) => {
+  mkdirSync(home, { recursive: true });
+  const fn = extractFunction("write_subagent_model_patch");
+  const proc = spawnSync(
+    "bash",
+    ["-euo", "pipefail", "-c", `${fn}\nEFFECTIVE_MODEL=zai/glm-5.3\nwrite_subagent_model_patch`],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DSH_HOME: home,
+        ...(value === undefined ? {} : { DSH_SUBAGENT_MODEL: value }),
+      },
+    },
+  );
+  const patchPath = path.join(home, "cordis.patch.yml");
+  return {
+    status: proc.status,
+    stderr: proc.stderr,
+    patch: existsSync(patchPath) ? readFileSync(patchPath, "utf8") : null,
+  };
+};
+
+test("DSH_SUBAGENT_MODEL unset writes no patch (children inherit — byte-identical default)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-submodel-unset-"));
+  const out = runPatchFn({ home: dir, value: undefined });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(out.status, 0, `unset must be a clean no-op, stderr: ${out.stderr}`);
+  assert.equal(out.patch, null, "no cordis.patch.yml may exist when the env is unset");
+});
+
+test("DSH_SUBAGENT_MODEL=zai/glm-5.2 patches BOTH tool-subagent instances", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-submodel-write-"));
+  const out = runPatchFn({ home: dir, value: "zai/glm-5.2" });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(out.status, 0, `valid value must succeed, stderr: ${out.stderr}`);
+  assert.match(out.stderr, /subagent model: zai\/glm-5\.2 .*main stays zai\/glm-5\.3/);
+  assert.match(out.patch, /id: tool-subagent$/m, "spawn instance (the subagent tool) overridden");
+  assert.match(out.patch, /id: tool-subagent-fork$/m, "fork instance (subagent_fork) overridden");
+  assert.match(out.patch, /provider: zai\n {6}model: glm-5\.2/, "agentOptions carry the split ids");
+  assert.equal(out.patch.match(/model: glm-5\.2/g).length, 2, "exactly two overrides, one per instance");
+});
+
+test("DSH_SUBAGENT_MODEL without a provider/model slash fails loud (exit 2, no file)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-submodel-bad-"));
+  const out = runPatchFn({ home: dir, value: "glm-5.2" });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(out.status, 2, "malformed value must abort the run, not silently inherit");
+  assert.match(out.stderr, /DSH_SUBAGENT_MODEL must be provider\/model/);
+  assert.equal(out.patch, null);
+});
+
+test("a hand-placed cordis.patch.yml is refused, never clobbered", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-submodel-clobber-"));
+  const existing = "# operator overlay\n- id: tool-bash\n  disabled: true\n";
+  writeFileSync(path.join(dir, "cordis.patch.yml"), existing);
+  const out = runPatchFn({ home: dir, value: "zai/glm-5.2" });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(out.status, 2, "clobbering an operator's overlay must abort, not overwrite");
+  assert.match(out.stderr, /refusing to clobber/);
+  assert.equal(out.patch, existing, "the hand-placed overlay must be byte-identical after the refusal");
+});
+
+test("the full launcher puts the patch in place BEFORE dsh starts (call-site ordering)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-submodel-e2e-"));
+  const bin = path.join(dir, "bin");
+  const runnerTemp = path.join(dir, "runner");
+  mkdirSync(bin);
+  mkdirSync(runnerTemp);
+  // dsh stub: prints the patch the agent would compose against — if the
+  // call site ran after launch, the cat fails and this test goes red.
+  writeFileSync(
+    path.join(bin, "dsh"),
+    [
+      "#!/bin/sh",
+      'case "$1" in --version) echo "dsh-stub-0.0.0" >&2; exit 0;; esac',
+      'echo "PATCH-BEGIN"; cat "${DSH_HOME}/cordis.patch.yml" || echo "NO-PATCH-FILE"; echo "PATCH-END"',
+      "echo STUB-FINAL-ANSWER",
+    ].join("\n") + "\n",
+  );
+  writeFileSync(path.join(bin, "doppler"), "#!/bin/sh\nshift; shift; shift; shift\nexec \"$@\"\n");
+  writeFileSync(path.join(bin, "zstd"), "#!/bin/sh\nexit 0\n");
+  for (const f of readdirSync(bin)) spawnSync("chmod", ["+x", path.join(bin, f)]);
+
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: dir,
+    RUNNER_TEMP: runnerTemp,
+    DOPPLER_SERVICE_TOKEN: "stub-token",
+    DSH_SUBAGENT_MODEL: "zai/glm-5.2",
+    DSH_KEEP_SESSIONS: "",
+  };
+  delete env.GH_TOKEN;
+  delete env.GITHUB_ENV;
+  delete env.DSH_HOME;
+  delete env.DSH_PERSISTENT_HOME;
+  delete env.DSH_SESSION_PATH_FILE;
+
+  const proc = spawnSync("bash", [SCRIPT, "integration test task"], { encoding: "utf8", env, timeout: 60_000 });
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(proc.status, 0, `launcher must succeed with the override set, stderr tail: ${proc.stderr.slice(-400)}`);
+  assert.match(proc.stderr, /subagent model: zai\/glm-5\.2/, "the override is logged next to the run model");
+  assert.match(proc.stdout, /PATCH-BEGIN[\s\S]*id: tool-subagent-fork[\s\S]*PATCH-END/, "the patch file existed when the agent launched");
+});
+
+// --- 5. the composed config REALLY routes children (real dsh, no stub) --
+//
+// The launcher's contract is not "a file exists" but "dsh composes it":
+// both tool-subagent instances must actually carry agentOptions after the
+// home-level patch. This guards the plugin-id coupling — if a dsh release
+// renames tool-subagent/tool-subagent-fork, the override silently stops
+// applying and THIS is the test that goes red. Skipped when the dsh CLI
+// is absent (such lanes keep the function-level coverage above).
+test("dsh composes the patch: both tool-subagent instances carry the turbo agentOptions", () => {
+  const dshBin = spawnSync("bash", ["-c", "command -v dsh"], { encoding: "utf8" }).stdout?.trim();
+  if (!dshBin) return; // tolerate lanes without the CLI
+
+  const home = mkdtempSync(path.join(tmpdir(), "dsh-submodel-compose-"));
+  const out = runPatchFn({ home, value: "zai/glm-5.2" });
+  assert.equal(out.status, 0, `patch write failed: ${out.stderr}`);
+
+  // A FRESH temp home carrying only cordis.patch.yml: the profile
+  // auto-initializes from shipped templates (base/headless bundles
+  // resolve from the dsh installation — no network, no npm install).
+  const probeHome = mkdtempSync(path.join(tmpdir(), "dsh-submodel-probe-"));
+  spawnSync("cp", [path.join(home, "cordis.patch.yml"), path.join(probeHome, "cordis.patch.yml")]);
+  const cwd = mkdtempSync(path.join(tmpdir(), "dsh-submodel-cwd-"));
+  const probe = spawnSync(dshBin, ["--profile", "headless", "--dump-config"], {
+    encoding: "utf8",
+    timeout: 120_000,
+    cwd,
+    env: { ...process.env, DSH_HOME: probeHome },
+  });
+  rmSync(home, { recursive: true, force: true });
+  rmSync(probeHome, { recursive: true, force: true });
+  rmSync(cwd, { recursive: true, force: true });
+
+  assert.equal(probe.status, 0, `dsh --dump-config failed: ${probe.stderr.slice(-300)}`);
+  // The dump prints EVERY layer's view (the patched composition on top of
+  // the base layer), so occurrence counting is ambiguous; what pins the
+  // contract is the exact composed BLOCK per instance plus the dump's own
+  // banner attributing the override to our patch file.
+  assert.match(
+    probe.stdout,
+    /patched by [^\n]*dsh-submodel-probe-[^\n]*cordis\.patch\.yml/,
+    "the composed tree must attribute a layer to our patch file",
+  );
+  const composedBlock = (toolId) =>
+    new RegExp(
+      `- id: ${toolId}\n` +
+      "  name: '@deepseek-ai/dsh-tool-subagent'\\n" +
+      "  config:\\n" +
+      "    agentOptions:\\n" +
+      "      provider: zai\\n" +
+      "      model: glm-5\\.2",
+    );
+  assert.match(probe.stdout, composedBlock("tool-subagent"), "the subagent (spawn) instance must carry the turbo agentOptions");
+  assert.match(probe.stdout, composedBlock("tool-subagent-fork"), "the subagent_fork (fork) instance must carry the turbo agentOptions");
+});

@@ -19,6 +19,8 @@
 #   DSH_VERSION           dsh npm version to install if missing (default 0.1.0-rc.7)
 #   DSH_PERMISSION_MODE   sandbox/approval mode (default danger-full-access:
 #                         no human to ask in CI, so approvals are never raised)
+#   DSH_SUBAGENT_MODEL    subagent children's model, provider/model (unset =
+#                         inherit the run model — see write_subagent_model_patch)
 #   DOPPLER_SERVICE_TOKEN required by `doppler run`
 #
 # Comment-bot reply wiring (used by dsh-agent-comment.yml):
@@ -139,6 +141,52 @@ elif [ -f "$DSH_HOME/settings.yaml" ]; then
   # no template available: leave existing settings (fleet default assumed)
   echo "run model: $PROVIDER/$MODEL_ID (no template; settings untouched)" >&2
 fi
+
+# Per-run SUBAGENT model: "provider/model" (e.g. zai/glm-5.2). Children
+# spawned by the `subagent`/`subagent_fork` tools INHERIT the run model
+# unless the tool instance overrides it (dsh-agent AgentOptions); this
+# writes the HOME-LEVEL profile patch ($DSH_HOME/cordis.patch.yml) that
+# dsh composes AFTER the profile layers, setting agentOptions on BOTH
+# tool-subagent instances — the main agent stays on EFFECTIVE_MODEL while
+# every delegated child rides the given model. Config-only override of
+# BUNDLED plugins: unlike the reverted --patch mount (f2972e7 — a bare
+# -path plugin that could not resolve @deepseek-ai deps), no plugin is
+# loaded from outside the bundles, so no dependency resolution is
+# involved. Unset/empty = no patch file = children inherit (today's
+# behavior). A hand-placed patch file is REFUSED, never clobbered.
+#   DSH_SUBAGENT_MODEL=zai/glm-5.2
+write_subagent_model_patch() {
+  [ -n "${DSH_SUBAGENT_MODEL:-}" ] || return 0
+  case "$DSH_SUBAGENT_MODEL" in
+    */*) ;;
+    *) echo "error: DSH_SUBAGENT_MODEL must be provider/model (got '$DSH_SUBAGENT_MODEL')" >&2; return 2;;
+  esac
+  local sub_provider="${DSH_SUBAGENT_MODEL%/*}"
+  local sub_model="${DSH_SUBAGENT_MODEL#*/}"
+  local patch_file="$DSH_HOME/cordis.patch.yml"
+  # The home may not exist yet at this point (the setup group below runs
+  # later) — mint it; the job-scoped home cleanup already tolerates that.
+  mkdir -p "$DSH_HOME"
+  if [ -e "$patch_file" ]; then
+    echo "error: $patch_file already exists; refusing to clobber a hand-placed overlay — merge the agentOptions entries by hand" >&2
+    return 2
+  fi
+  cat > "$patch_file" <<PATCH
+# per-run overlay (DSH_SUBAGENT_MODEL): subagent children on $DSH_SUBAGENT_MODEL
+- id: tool-subagent
+  config:
+    agentOptions:
+      provider: $sub_provider
+      model: $sub_model
+- id: tool-subagent-fork
+  config:
+    agentOptions:
+      provider: $sub_provider
+      model: $sub_model
+PATCH
+  echo "subagent model: $sub_provider/$sub_model (children overridden; main stays $EFFECTIVE_MODEL)" >&2
+}
+write_subagent_model_patch
 
 export DSH_PERMISSION_MODE="${DSH_PERMISSION_MODE:-danger-full-access}"
 DSH_VERSION="${DSH_VERSION:-0.1.0-rc.7}"
