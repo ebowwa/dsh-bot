@@ -231,7 +231,13 @@ DSH_PID=$!
 
 stream_session_progress() {
   # $1: marker newer-than, $2: pid of dsh wrapper
-  local tmp_jsonl seen=0 total  # session_file deliberately global (cleanup)
+  # session_file must be initialized: when the wrapper pid is already dead
+  # at the first probe (agent crashed instantly — run 32797020619), the
+  # loop breaks before any find assignment and set -u aborts the streamer
+  # on an unbound variable instead of degrading gracefully. It was never
+  # usefully global anyway: this function runs backgrounded (a subshell),
+  # so the parent reads SESSION_PATH_FILE, not this variable.
+  local tmp_jsonl seen=0 total session_file=""
   command -v zstd >/dev/null 2>&1 || return 0
   [ -x "$(command -v node)" ] || return 0
   tmp_jsonl="$(mktemp /tmp/dsh-progress-slice.XXXXXX)"
@@ -266,8 +272,14 @@ stream_session_progress() {
 stream_session_progress "$MARKER" "$DSH_PID" &
 PROGRESS_PID=$!
 
-wait "$DSH_PID"
-RC=$?
+# `wait ... || RC=$?` (not bare `wait` + RC=$?): under set -e a nonzero
+# agent exit aborted the script HERE — before the transcript cleanup below,
+# before the final answer was relayed, before the job-scoped home was
+# removed. In run 32797020619 the dead agent left its home on the runner.
+# The failure must still surface (exit "$RC" at the end), but only AFTER
+# cleanup has run.
+RC=0
+wait "$DSH_PID" || RC=$?
 wait "$PROGRESS_PID" 2>/dev/null || true
 echo "::endgroup::" >&2
 
