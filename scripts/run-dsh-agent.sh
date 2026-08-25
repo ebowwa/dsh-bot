@@ -157,9 +157,27 @@ fi
 #   DSH_SUBAGENT_MODEL=zai/glm-5.2
 write_subagent_model_patch() {
   [ -n "${DSH_SUBAGENT_MODEL:-}" ] || return 0
+  # Validation is charset+shape, not mere slash-presence: the value becomes
+  # STRUCTURED YAML (two config maps), so a newline can inject sibling keys,
+  # a `#` comments out the overlay, a `:` reinterprets a scalar. A glob case
+  # class cannot express "only these chars" — its trailing `*` is an
+  # UNBOUNDED star, not a class quantifier ([A-Za-z0-9._-]* still admits
+  # `zai/glm:5.2`) — so delete the allowed set and require an empty residue,
+  # then pin the shape with anchored cases.
+  local residue="${DSH_SUBAGENT_MODEL//[A-Za-z0-9._-]/}"
+  residue="${residue//\//}"
   case "$DSH_SUBAGENT_MODEL" in
     */*) ;;
     *) echo "error: DSH_SUBAGENT_MODEL must be provider/model (got '$DSH_SUBAGENT_MODEL')" >&2; return 2;;
+  esac
+  if [ -n "$residue" ]; then
+    echo "error: DSH_SUBAGENT_MODEL may contain only [A-Za-z0-9._-/] — the value becomes structured YAML, metacharacters are rejected (got '$DSH_SUBAGENT_MODEL')" >&2
+    return 2
+  fi
+  case "$DSH_SUBAGENT_MODEL" in
+    /*|*/|*/*/*|*/[!A-Za-z0-9]*|[!A-Za-z0-9]*)
+      echo "error: DSH_SUBAGENT_MODEL must be provider/model — exactly one '/', both halves non-empty and starting [A-Za-z0-9] (got '$DSH_SUBAGENT_MODEL')" >&2
+      return 2;;
   esac
   local sub_provider="${DSH_SUBAGENT_MODEL%/*}"
   local sub_model="${DSH_SUBAGENT_MODEL#*/}"
@@ -171,19 +189,41 @@ write_subagent_model_patch() {
     echo "error: $patch_file already exists; refusing to clobber a hand-placed overlay — merge the agentOptions entries by hand" >&2
     return 2
   fi
+  # A patch entry with the same plugin id REPLACES the whole config map —
+  # dsh does NOT deep-merge patches into the base layer. Repeating the
+  # base keys (provider/toolName/backgroundMode, verbatim from the dsh
+  # 0.1.0-rc.7 base bundles) is what keeps the zod schema satisfied; a
+  # bare agentOptions-only entry wipes `provider` and the run dies at
+  # boot with "plugin tree failed to load … $.provider missing required
+  # value" (review run 32897389988, finding 1). The composition test
+  # boots the real profile against exactly this file — if a dsh release
+  # changes these base keys, that test is what goes red.
   cat > "$patch_file" <<PATCH
 # per-run overlay (DSH_SUBAGENT_MODEL): subagent children on $DSH_SUBAGENT_MODEL
+# config maps REPLACE per id — base keys are carried through, not merged.
 - id: tool-subagent
   config:
+    provider: spawn
+    toolName: subagent
+    backgroundMode: continuable
     agentOptions:
       provider: $sub_provider
       model: $sub_model
 - id: tool-subagent-fork
   config:
+    provider: fork
+    toolName: subagent_fork
+    backgroundMode: one-shot
     agentOptions:
       provider: $sub_provider
       model: $sub_model
 PATCH
+  # Our own residue must not outlive the run: on a persistent/explicit
+  # home a surviving patch composes on EVERY later run (presence is the
+  # only trigger — DSH_SUBAGENT_MODEL plays no part), silently riding the
+  # stale model, then aborting the next explicit override at the clobber
+  # guard above. The exit path rm's the file when this flag is set.
+  SUBAGENT_PATCH_WRITTEN=1
   echo "subagent model: $sub_provider/$sub_model (children overridden; main stays $EFFECTIVE_MODEL)" >&2
 }
 write_subagent_model_patch
@@ -349,6 +389,16 @@ if [ "${DSH_KEEP_SESSIONS:-0}" != "1" ]; then
     rm -rf "$(dirname "$SESSION_PATH")" 2>/dev/null || true
     rm -f "${DSH_SESSION_PATH_FILE:-${TMPDIR:-/tmp}/dsh-session-path.$$}" 2>/dev/null || true
   fi
+fi
+
+# Remove OUR subagent patch even when the home survives the run
+# (persistent/explicit DSH_HOME — the job-scoped home is rm -rf'd below
+# anyway). Unlike transcripts (DSH_KEEP_SESSIONS), the patch is derived
+# state: fully reproducible from DSH_SUBAGENT_MODEL, and a survivor
+# composes into every later run against that home — silently at first,
+# then as a clobber-refusal exit 2 on the next explicit override.
+if [ "${SUBAGENT_PATCH_WRITTEN:-0}" = "1" ]; then
+  rm -f "${DSH_HOME:-}/cordis.patch.yml" 2>/dev/null || true
 fi
 
 # stdout carries ONLY the agent's final answer (the comment workflow tees it).

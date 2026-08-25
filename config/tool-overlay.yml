@@ -1,5 +1,10 @@
-# dsh-bot tool overlay — mounted by run-dsh-agent.sh via --patch.
-# Adds the composition search tool (see plugins/tool-search-compose).
+# dsh-bot tool overlay — composition search tool (see plugins/tool-search-compose).
+# NOT mounted by anything: the run-dsh-agent.sh `--patch` mount was reverted
+# at f2972e7 (a bare-path plugin cannot resolve its @deepseek-ai deps; proper
+# packaging follows). Kept as the intended overlay content for that future
+# mount — to compose by hand today, place it at $DSH_HOME/cordis.patch.yml
+# (and note run-dsh-agent.sh refuses to launch with a hand-placed patch file
+# present while DSH_SUBAGENT_MODEL is set — its own patch refuses to clobber).
 - insert:
     - id: tool-search-compose
       name: ./plugins/tool-search-compose/index.js
