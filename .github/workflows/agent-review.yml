@@ -21,6 +21,10 @@ on:
         description: "Model for this run: provider/model (e.g. zai/glm-5.2). Empty = fleet default"
         type: string
         default: ""
+      subagent-model:
+        description: "Model for the subagent/subagent_fork children: provider/model (e.g. zai/glm-5-turbo). Empty = inherit the head's model"
+        type: string
+        default: ""
       timeout-minutes:
         description: "Per-review cap in minutes"
         type: number
@@ -86,6 +90,7 @@ jobs:
           PR: ${{ steps.pr.outputs.number }}
           RULES_FILE: ${{ inputs.rules-file }}
           DSH_MODEL: ${{ inputs.model }}
+          DSH_SUBAGENT_MODEL: ${{ inputs.subagent-model }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail

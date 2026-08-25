@@ -16,7 +16,7 @@ secrets. This repo needs no runners of its own.
 | `.github/workflows/agent-comment.yml` | the comment loop: context fetch → scrub → agent → ship → reply → review dispatch |
 | `.github/workflows/agent-review.yml` | adversarial review stage (rules + gates + verdict + labels) |
 | `.github/workflows/agent-dispatch.yml` | manual/scheduled task entry |
-| `scripts/run-dsh-agent.sh` | driver: dsh install, settings bootstrap, gh/git identity, scrub shims, live trace, Doppler exec |
+| `scripts/run-dsh-agent.sh` | driver: dsh install, settings bootstrap, gh/git identity, scrub shims, live trace, Doppler exec; head model via `DSH_MODEL`, subagent/subagent_fork children via `DSH_SUBAGENT_MODEL` (unset = inherit the head) |
 | `scripts/scrub-output.mjs` | redaction (creds/PII/SSH keys in both directions; IP/host/path/date on outputs) |
 | `scripts/gh-scrub-shim`, `git-scrub-shim` | the scrubber BETWEEN agent and GitHub/git |
 | `scripts/dsh-progress.mjs` | live JSON trace of reasoning/tool events |
