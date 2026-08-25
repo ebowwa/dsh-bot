@@ -226,7 +226,8 @@ touch "$MARKER"
 # provider). ZAI_API_KEY must remain — it IS the inference credential.
 doppler run --token "$DOPPLER_SERVICE_TOKEN" -- \
   env -u DOPPLER_SERVICE_TOKEN -u DOPPLER_CONFIG -u DOPPLER_PROJECT -u DOPPLER_ENVIRONMENT \
-  dsh --profile headless "$TASK" >"$FINAL_OUT" &
+  # --patch mounts dsh-bot tool overlay (composition search; ADR 2026-08-25)
+  dsh --profile headless --patch "$DSH_BOT_DIR/config/tool-overlay.yml" "$TASK" >"$FINAL_OUT" &
 DSH_PID=$!
 
 stream_session_progress() {
