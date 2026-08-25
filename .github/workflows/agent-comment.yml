@@ -43,6 +43,10 @@ on:
         description: "Model for this run: provider/model (e.g. zai/glm-5.2). Empty = fleet default (zai/glm-5.3)"
         type: string
         default: ""
+      subagent-model:
+        description: "Model for the subagent/subagent_fork children: provider/model (e.g. zai/glm-5-turbo). Empty = inherit the head's model"
+        type: string
+        default: ""
       extra-scrub-hosts:
         description: "Comma-separated hostnames to redact on output surfaces (runner fleet names — this file is public, hosts are consumer-private)"
         type: string
@@ -99,6 +103,7 @@ jobs:
           REVIEW_WORKFLOW: ${{ inputs.review-workflow }}
           EXTRA_SCRUB_HOSTS: ${{ inputs.extra-scrub-hosts }}
           DSH_MODEL: ${{ inputs.model }}
+          DSH_SUBAGENT_MODEL: ${{ inputs.subagent-model }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail

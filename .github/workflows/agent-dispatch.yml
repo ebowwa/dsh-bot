@@ -21,6 +21,10 @@ on:
         description: "Model for this run: provider/model (e.g. zai/glm-5.2). Empty = fleet default"
         type: string
         default: ""
+      subagent-model:
+        description: "Model for the subagent/subagent_fork children: provider/model (e.g. zai/glm-5-turbo). Empty = inherit the head's model"
+        type: string
+        default: ""
       timeout-minutes:
         type: number
         default: 120
@@ -65,6 +69,7 @@ jobs:
           TASK_INPUT: ${{ inputs.task }}
           DSH_KEEP_SESSIONS: "1" # flight recorder: keep the session transcript for the artifact upload # env, never raw ${{ }} into bash (injection seam)
           DSH_MODEL: ${{ inputs.model }}
+          DSH_SUBAGENT_MODEL: ${{ inputs.subagent-model }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail

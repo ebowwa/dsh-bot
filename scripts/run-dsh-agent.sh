@@ -19,6 +19,9 @@
 #   DSH_VERSION           dsh npm version to install if missing (default 0.1.0-rc.7)
 #   DSH_PERMISSION_MODE   sandbox/approval mode (default danger-full-access:
 #                         no human to ask in CI, so approvals are never raised)
+#   DSH_MODEL             head model, "provider/model" (default zai/glm-5.3)
+#   DSH_SUBAGENT_MODEL    subagent/subagent_fork children's model, "provider/model"
+#                         (unset = inherit the head's route)
 #   DOPPLER_SERVICE_TOKEN required by `doppler run`
 #
 # Comment-bot reply wiring (used by dsh-agent-comment.yml):
@@ -216,6 +219,56 @@ if [ -x "$SCRIPT_DIR/gh-scrub-shim" ] || [ -x "$SCRIPT_DIR/git-scrub-shim" ]; th
   export PATH="$SHIM_BIN:$PATH"
 fi
 
+# --- 2d. subagent model override (issue #220: submodels on turbo) ----------
+# DSH_SUBAGENT_MODEL routes the plain subagent/subagent_fork children (the
+# two dsh-tool-subagent instances) to "provider/model" instead of the head's
+# route. Unset = inherit the parent = today's behavior: no patch file, no
+# extra flag, byte-identical launch line. The override rides a REGENERATED
+# patch overlay (same idempotence rule as the settings stamp above): a patch
+# row REPLACES the whole plugin config, so provider/toolName/backgroundMode
+# are restated from the headless profile defaults alongside agentOptions.
+# The model id must exist in the settings catalog — an unknown id fails loud
+# at the first child spawn (UNKNOWN_MODEL), same as a bogus DSH_MODEL.
+SUBAGENT_PATCH_FILE=""
+if [ -n "${DSH_SUBAGENT_MODEL:-}" ]; then
+  case "$DSH_SUBAGENT_MODEL" in
+    */*) ;;
+    *) echo "error: DSH_SUBAGENT_MODEL must be provider/model (got '$DSH_SUBAGENT_MODEL')" >&2; exit 2;;
+  esac
+  SUB_PROVIDER="${DSH_SUBAGENT_MODEL%/*}"
+  SUB_MODEL_ID="${DSH_SUBAGENT_MODEL#*/}"
+  SUBAGENT_PATCH_FILE="$DSH_HOME/subagent-model.patch.yml"
+  {
+    echo "# Stamped by run-dsh-agent.sh from DSH_SUBAGENT_MODEL=$DSH_SUBAGENT_MODEL (regenerated every run)."
+    echo "# Patch rows replace the whole plugin config: provider/toolName/backgroundMode"
+    echo "# restated from the headless profile defaults; agentOptions overrides the route"
+    echo "# the children would otherwise inherit from the head (resolveChildAgentOptions)."
+    echo "- id: tool-subagent"
+    echo "  config:"
+    echo "    provider: spawn"
+    echo "    toolName: subagent"
+    echo "    backgroundMode: continuable"
+    echo "    agentOptions:"
+    echo "      provider: $SUB_PROVIDER"
+    echo "      model: $SUB_MODEL_ID"
+    echo "- id: tool-subagent-fork"
+    echo "  config:"
+    echo "    provider: fork"
+    echo "    toolName: subagent_fork"
+    echo "    backgroundMode: one-shot"
+    echo "    agentOptions:"
+    echo "      provider: $SUB_PROVIDER"
+    echo "      model: $SUB_MODEL_ID"
+  } > "$SUBAGENT_PATCH_FILE"
+  echo "subagent model: $SUB_PROVIDER/$SUB_MODEL_ID (subagent + subagent_fork; head stays $PROVIDER/$MODEL_ID)" >&2
+fi
+# Array + ${arr[@]+...} guard: set -u with an empty array is an error on
+# bash 3.2 (the mac cells' /bin/bash) — the guard expands to nothing instead.
+DSH_LAUNCH_ARGS=()
+if [ -n "$SUBAGENT_PATCH_FILE" ]; then
+  DSH_LAUNCH_ARGS+=(--patch "$SUBAGENT_PATCH_FILE")
+fi
+
 # --- 3. Doppler-injected run, with live progress ---------------------------
 # `doppler run` derives project + config from the service token and exports
 # every secret in that config as env. dsh-llm-pi-ai resolves apiKeyEnv:
@@ -235,7 +288,7 @@ touch "$MARKER"
 # provider). ZAI_API_KEY must remain — it IS the inference credential.
 doppler run --token "$DOPPLER_SERVICE_TOKEN" -- \
   env -u DOPPLER_SERVICE_TOKEN -u DOPPLER_CONFIG -u DOPPLER_PROJECT -u DOPPLER_ENVIRONMENT \
-  dsh --profile headless "$TASK" >"$FINAL_OUT" &
+  dsh --profile headless ${DSH_LAUNCH_ARGS[@]+"${DSH_LAUNCH_ARGS[@]}"} "$TASK" >"$FINAL_OUT" &
 DSH_PID=$!
 
 stream_session_progress() {
