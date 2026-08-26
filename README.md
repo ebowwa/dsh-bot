@@ -21,6 +21,7 @@ secrets. This repo needs no runners of its own.
 | `scripts/gh-scrub-shim`, `git-scrub-shim` | the scrubber BETWEEN agent and GitHub/git |
 | `scripts/dsh-progress.mjs` | live JSON trace of reasoning/tool events |
 | `scripts/workflow-lint.mjs` | structural workflow-YAML lint (block-indent consistency; gates runs it — run 32705244305 regression) |
+| `scripts/tests-lint.mjs` | structural test-source lint: rejects PATH assignments that hard-code system dirs without the ambient PATH — they cannot construct a lane-installed CLI's absence (run 32933615526 regression; the corpus test rides `node --test`) |
 | `config/settings.zai.yaml` | DSH settings template (zai provider, glm-5.3) |
 | `consumers.txt` | repos receiving drift bump-PRs |
 
