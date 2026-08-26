@@ -29,12 +29,24 @@
 #
 # Env names deliberately avoid the KEY/PASSWORD/SECRET/TOKEN patterns
 # (dsh scrubs those from agent child processes) even though this step's
-# env never reaches the agent. The token VALUE is never printed, logged,
-# or written anywhere except the local git config — the same place the
-# checkout puts the ephemeral one today. Decision lines are the log.
+# env never reaches the agent. The token VALUE is never printed or
+# logged, and its only resting places are the local git config — the
+# same place the checkout puts the ephemeral one today — and 0600 mktemp
+# transients (the doppler fetch output, the scope probe's curl config
+# file), each read once and removed. It never rides argv: the config
+# stanza is appended by a bash-builtin printf redirect, and the probe's
+# Authorization header travels inside that curl config file, never in a
+# -H argument — so no spawned process ever lists the value on its
+# command line (argv is ps//proc/<pid>/cmdline readable by any
+# concurrent job under the same runner service account;
+# actions/checkout keeps its credential out of argv for the same
+# reason). Decision lines are the log.
 #
 # Local/dev or test invocation: PATH-shim `doppler`/`curl` (see
-# tests/resolve-push-token.test.mjs); GIT_BIN and a cwd that is a git
+# tests/resolve-push-token.test.mjs — including a fully hermetic PATH
+# that constructs "no doppler on this runner" without depending on the
+# lane image); GIT_BIN (the one seam, same as before — the offline suite
+# points it at an argv-observing shim) and a cwd that is a git
 # repository are required.
 set -euo pipefail
 
@@ -46,35 +58,102 @@ CONFIG="${DOPPLER_CONFIG:-prd}"
 FALLBACK="${PUSH_FALLBACK_CRED:?no fallback credential supplied (expected secrets.DSH_BOT_REPO_TOKEN || github.token)}"
 
 GIT_BIN="${GIT_BIN:-git}"
-# Test seam only — callers never set it. An explicit path lets the offline
-# suite construct "no doppler on this runner": the dsh lanes install the
-# real CLI in a system dir, so PATH restriction alone cannot hide it.
-DOPPLER_BIN="${DOPPLER_BIN:-doppler}"
+# Bound on a hung doppler fetch, in seconds (review round-1 finding 4:
+# the curl probe was already bounded, the fetch was not — a hung Doppler
+# API held the job until the workflow-level timeout). GNU `timeout` is
+# absent on the mac cells, so the bound is a background fetch + watchdog.
+FETCH_TIMEOUT_S="${DOPPLER_FETCH_TIMEOUT_S:-20}"
+# Validate AFTER the default (review r2 finding 3): `:-` absorbs an
+# unset-or-empty value, but a NON-NUMERIC one
+# (`DOPPLER_FETCH_TIMEOUT_S=abc`) passes straight through — `sleep "abc"`
+# fails instantly, the watchdog subshell dies silently, and the fetch is
+# unbounded again, the exact regression this bound exists to close. Any
+# unusable value (empty, non-numeric) falls back to the 20s default.
+case "$FETCH_TIMEOUT_S" in ''|*[!0-9]*) FETCH_TIMEOUT_S=20;; esac
 
 write_header() { # $1 = token value; base64 may wrap (BSD, 76 cols) — strip newlines
-  "$GIT_BIN" config --local http.https://github.com/.extraheader \
-    "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$1" | base64 | tr -d '\n')"
+  # Idempotency first: drop any prior stanza. argv carries only the KEY;
+  # exit 5 ("no such key") on a fresh checkout is expected, not an error,
+  # and the appended stanza plus every push that follows re-verifies it.
+  "$GIT_BIN" config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+  # Append the stanza to .git/config directly: printf is a bash builtin
+  # and the value is a %s ARGUMENT (never part of the format, never an
+  # argument of a spawned process), so the credential stays off argv.
+  # base64 (+, /, =) and the AUTHORIZATION prefix contain no quote or
+  # backslash characters, so the double-quoted git-config value is exact.
+  # The format starts with a blank line (review r2 finding 2): when the
+  # key is absent, --unset-all above is a no-op and does NOT normalize
+  # the file, so a .git/config whose last line lacks a newline would
+  # fuse the [http …] section header onto it and stop parsing — the
+  # leading \n makes the append self-sealing (a stray blank line in a
+  # git config is harmless).
+  printf '\n[http "https://github.com/"]\n\textraheader = "%s"\n' \
+    "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$1" | base64 | tr -d '\n')" \
+    >> "$("$GIT_BIN" rev-parse --git-dir)/config"
 }
 
-if [ -z "${DOPPLER_SERVICE_TOKEN:-}" ] || ! command -v "$DOPPLER_BIN" >/dev/null 2>&1; then
+if [ -z "${DOPPLER_SERVICE_TOKEN:-}" ] || ! command -v doppler >/dev/null 2>&1; then
   echo "push-token: workflow secret fallback (no doppler cli/service token on this runner)"
   write_header "$FALLBACK"; exit 0
 fi
 
-TOK="$("$DOPPLER_BIN" secrets get GITHUB_TOKEN --project "$PROJECT" --config "$CONFIG" --plain 2>/dev/null)" || {
+# Bounded doppler fetch — parity with the --max-time 15 probe below: a
+# hung Doppler API must not hold the job. The fetch runs backgrounded
+# with a watchdog (no GNU `timeout` on the mac cells); a watchdog kill
+# surfaces through the same typed fallback as every doppler-side
+# failure. The token value's only resting place besides the git config
+# is a 0600 mktemp file, read once and removed on both branches.
+OUT_FILE="$(mktemp "${TMPDIR:-/tmp}/resolve-push-token.XXXXXX")"
+FETCH_PID='' WATCHDOG_PID=''
+reap_watchdog() { # stop the timer once the fetch answered (quiet, idempotent)
+  kill "$WATCHDOG_PID" 2>/dev/null || true
+  wait "$WATCHDOG_PID" 2>/dev/null || true
+}
+doppler secrets get GITHUB_TOKEN --project "$PROJECT" --config "$CONFIG" --plain \
+  >"$OUT_FILE" 2>/dev/null &
+FETCH_PID=$!
+# The watchdog is detached from our stdio (>/dev/null 2>&1 </dev/null):
+# an inherited stdout pipe would hold every caller waiting on it (CI log
+# collectors, spawn-based callers) until the timer expires, even after
+# this script has exited — the orphaned `sleep` keeps the pipe open.
+( sleep "$FETCH_TIMEOUT_S" && kill "$FETCH_PID" 2>/dev/null ) >/dev/null 2>&1 </dev/null &
+WATCHDOG_PID=$!
+FETCH_OK=0
+if wait "$FETCH_PID"; then FETCH_OK=1; fi
+reap_watchdog
+if [ "$FETCH_OK" -ne 1 ]; then
+  rm -f "$OUT_FILE"
   echo "push-token: workflow secret fallback (doppler fetch failed)"
   write_header "$FALLBACK"; exit 0
-}
+fi
+TOK="$(cat "$OUT_FILE")"
+rm -f "$OUT_FILE"
 if [ -z "$TOK" ]; then
   echo "push-token: workflow secret fallback (doppler $PROJECT/$CONFIG has no GITHUB_TOKEN)"
   write_header "$FALLBACK"; exit 0
 fi
 
 # Bounded probe (--max-time 15): a hung api.github.com must not hold the
-# job; a failed probe falls back like every doppler-side failure.
-SCOPES="$(curl -sI --max-time 15 -H "Authorization: token $TOK" https://api.github.com/user \
-  | tr -d '\r' | awk -F': ' 'tolower($1)=="x-oauth-scopes" {print $2}')" \
-  || { echo "push-token: workflow secret fallback (scope probe failed — no answer from api.github.com)"; write_header "$FALLBACK"; exit 0; }
+# job; a failed probe falls back like every doppler-side failure. The
+# Authorization header rides a 0600 mktemp curl --config file, never a
+# -H argument — argv is ps//proc/<pid>/cmdline readable by concurrent
+# jobs under the same runner service account, exactly the exposure the
+# credential write avoids (review r2 finding 1: the round-2 probe passed
+# `-H "Authorization: token …"` on curl's command line). printf is a
+# builtin and the value is a %s argument, so it never rides argv here
+# either; a token containing config-breaking characters (quote,
+# backslash) makes curl fail to parse the file and takes the typed
+# fallback below — fail-closed. Removed on both branches, the same
+# discipline as OUT_FILE.
+HDR_FILE="$(mktemp "${TMPDIR:-/tmp}/resolve-push-token.XXXXXX")"
+printf 'header = "Authorization: token %s"\n' "$TOK" >"$HDR_FILE"
+if ! SCOPES="$(curl -sI --max-time 15 --config "$HDR_FILE" https://api.github.com/user \
+    | tr -d '\r' | awk -F': ' 'tolower($1)=="x-oauth-scopes" {print $2}')"; then
+  rm -f "$HDR_FILE"
+  echo "push-token: workflow secret fallback (scope probe failed — no answer from api.github.com)"
+  write_header "$FALLBACK"; exit 0
+fi
+rm -f "$HDR_FILE"
 if [ -z "$SCOPES" ]; then
   echo "push-token: workflow secret fallback (scope probe returned nothing — token invalid?)"
   write_header "$FALLBACK"; exit 0
