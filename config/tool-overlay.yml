@@ -1,5 +1,9 @@
-# dsh-bot tool overlay — mounted by run-dsh-agent.sh via --patch.
-# Adds the composition search tool (see plugins/tool-search-compose).
+# dsh-bot tool overlay — composition search tool (see plugins/tool-search-compose).
+# NOT mounted: the run-dsh-agent.sh `--patch` mount for THIS file was
+# reverted at f2972e7 (a bare-path plugin cannot resolve its @deepseek-ai
+# deps; proper packaging follows). The launcher's --patch flag today carries
+# only its own per-run STAMPED subagent-model overlay — never this file.
+# Kept as the intended overlay content for that future mount.
 - insert:
     - id: tool-search-compose
       name: ./plugins/tool-search-compose/index.js
