@@ -138,29 +138,18 @@ test("doppler config without GITHUB_TOKEN falls back", withCase((repo) => {
 }));
 
 test("no doppler CLI on the runner falls back (workflow secret rules)", withCase((repo) => {
-  // Construct the absence: a PATH of ONLY the curl shim + system dirs —
-  // the real doppler (homebrew /opt/homebrew/bin on dev machines, runner
-  // PATH on the lanes) must be unreachable, and prepending a doppler-less
-  // dir does NOT hide it (command -v keeps walking PATH).
-  const dir = mkdtempSync(path.join(tmpdir(), "resolve-push-nodoppler-"));
-  const curl = `#!/bin/sh
-printf 'HTTP/1.1 200 OK\\r\\nX-OAuth-Scopes: %s\\r\\n\\r\\n' "\${CURL_SCOPES-}"
-`;
-  writeFileSync(path.join(dir, "curl"), curl);
-  chmodSync(path.join(dir, "curl"), 0o755);
-  const env = {
-    ...process.env,
-    PATH: `${dir}:/usr/bin:/bin`,
-    DOPPLER_SERVICE_TOKEN: "svc-token",
-    PUSH_FALLBACK_CRED: "fallback-tok",
-    CURL_SCOPES: "repo, workflow",
-  };
+  // Construct the absence EXPLICITLY: the dsh lanes install the real
+  // doppler in a system dir, so no PATH restriction can hide it — the
+  // script's DOPPLER_BIN seam points at a path that does not exist
+  // (curl stays shimmed for the branch that must not be reached).
+  const { r, cleanup } = runResolver(repo, {
+    DOPPLER_BIN: "/nonexistent/doppler-for-test", CURL_SCOPES: "repo, workflow",
+  });
   try {
-    const r = spawnSync("bash", [SCRIPT], { cwd: repo, env, encoding: "utf8" });
     assert.equal(r.status, 0, r.stderr);
     assert.match(r.stdout, /no doppler cli\/service token/);
     assert.equal(headerIn(repo), headerFor("fallback-tok"));
-  } finally { rmSync(dir, { recursive: true, force: true }); }
+  } finally { cleanup(); }
 }));
 
 test("no DOPPLER_SERVICE_TOKEN secret falls back", withCase((repo) => {

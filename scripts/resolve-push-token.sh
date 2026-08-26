@@ -46,18 +46,22 @@ CONFIG="${DOPPLER_CONFIG:-prd}"
 FALLBACK="${PUSH_FALLBACK_CRED:?no fallback credential supplied (expected secrets.DSH_BOT_REPO_TOKEN || github.token)}"
 
 GIT_BIN="${GIT_BIN:-git}"
+# Test seam only — callers never set it. An explicit path lets the offline
+# suite construct "no doppler on this runner": the dsh lanes install the
+# real CLI in a system dir, so PATH restriction alone cannot hide it.
+DOPPLER_BIN="${DOPPLER_BIN:-doppler}"
 
 write_header() { # $1 = token value; base64 may wrap (BSD, 76 cols) — strip newlines
   "$GIT_BIN" config --local http.https://github.com/.extraheader \
     "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$1" | base64 | tr -d '\n')"
 }
 
-if [ -z "${DOPPLER_SERVICE_TOKEN:-}" ] || ! command -v doppler >/dev/null 2>&1; then
+if [ -z "${DOPPLER_SERVICE_TOKEN:-}" ] || ! command -v "$DOPPLER_BIN" >/dev/null 2>&1; then
   echo "push-token: workflow secret fallback (no doppler cli/service token on this runner)"
   write_header "$FALLBACK"; exit 0
 fi
 
-TOK="$(doppler secrets get GITHUB_TOKEN --project "$PROJECT" --config "$CONFIG" --plain 2>/dev/null)" || {
+TOK="$("$DOPPLER_BIN" secrets get GITHUB_TOKEN --project "$PROJECT" --config "$CONFIG" --plain 2>/dev/null)" || {
   echo "push-token: workflow secret fallback (doppler fetch failed)"
   write_header "$FALLBACK"; exit 0
 }
