@@ -48,6 +48,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.base-ref || github.ref }}
+          # persist-credentials: false — the checkout's ephemeral GITHUB_TOKEN
+          # (github-actions[bot]) must NOT survive into the agent's git: it
+          # can never push workflow-file edits, and a bot-actor push onto a
+          # PR whose diff touches workflows parks the triggered runs in
+          # action_required (factory #229: runs 32921795436/32924697952).
+          # The next step writes the real push credential.
+          persist-credentials: false
 
       - name: Fetch dsh-bot scripts
         uses: actions/checkout@v4
@@ -61,6 +68,20 @@ jobs:
           ref: ${{ inputs.dsh-bot-ref || 'main' }}
           path: .dsh-bot
           token: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
+
+      # Lane impact: none — same runners, one added step (a doppler fetch +
+      # one bounded curl per run, ~2-4s).
+      - name: Push credential (Doppler-first)
+        # Rewrites the git auth the checkout would have persisted: Doppler
+        # seed/prd GITHUB_TOKEN when its scopes cover repo+workflow, else
+        # DSH_BOT_REPO_TOKEN (documented PAT with workflow scope), else
+        # github.token (= exactly today's behavior). Decision line lands in
+        # this step's log; the token value only ever reaches the local git
+        # config. See scripts/resolve-push-token.sh for the full rationale.
+        env:
+          DOPPLER_SERVICE_TOKEN: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
+          PUSH_FALLBACK_CRED: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
+        run: bash "${GITHUB_WORKSPACE}/.dsh-bot/scripts/resolve-push-token.sh"
 
       - name: Run agent
         env:
