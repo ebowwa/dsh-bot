@@ -297,7 +297,7 @@ jobs:
           # warning pointing at the run log (the answer is tee'd there by
           # the agent step) instead of a bare 127.
           command -v gh >/dev/null 2>&1 \
-            || export PATH="$HOME/.dsh-bot-bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$PATH"
           command -v gh >/dev/null 2>&1 || {
             echo "::warning::gh unavailable on this cell — reply NOT posted to the thread; the agent's answer is in the run log"
             exit 0

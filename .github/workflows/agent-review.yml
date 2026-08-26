@@ -167,7 +167,7 @@ jobs:
           # log (tee'd by the review step), and this step's failure would
           # only bury it under a bare 127.
           command -v gh >/dev/null 2>&1 \
-            || export PATH="$HOME/.dsh-bot-bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$PATH"
           command -v gh >/dev/null 2>&1 || {
             echo "::warning::gh unavailable on this cell — review summary NOT relayed to the thread; see the run log"
             exit 0

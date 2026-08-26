@@ -173,50 +173,75 @@ ensure_cell_tools() {
   command -v "$node_bin" >/dev/null 2>&1 \
     || { echo "error: node missing on this cell — the driver itself needs it; provision the runner" >&2; return 1; }
   cell_probe_prefixes
+  # Failed-install stderr tails, surfaced in the final hint (a bare
+  # "fetch failed" hides 404s vs no-egress — review r1 finding 4).
+  local errlog; errlog="$(mktemp)"
   if ! command -v "$doppler_bin" >/dev/null 2>&1; then
     echo "cell-tools: doppler missing — installing (official install.sh --install-path $CELL_BIN)" >&2
     mkdir -p "$CELL_BIN"
     # install.sh honors --install-path and upgrades an existing binary in
     # place; verified against the script source (arg parse, Feb 2026).
-    curl -fsSL https://cli.doppler.com/install.sh | sh -s -- --install-path "$CELL_BIN" >/dev/null 2>&1 \
-      || echo "cell-tools: doppler install.sh failed (no egress to cli.doppler.com?)" >&2
+    if ! curl -fsSL https://cli.doppler.com/install.sh | sh -s -- --install-path "$CELL_BIN" 2>"$errlog"; then
+      echo "cell-tools: doppler install.sh failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2
+    fi
     cell_probe_prefixes
   fi
   if ! command -v "$gh_bin" >/dev/null 2>&1; then
-    echo "cell-tools: gh missing — installing latest release into $CELL_BIN" >&2
-    mkdir -p "$CELL_BIN"
-    GH_OS="$(uname -s)"; GH_ARCH="$(uname -m)"
-    case "$GH_OS:$GH_ARCH" in
-      Darwin:arm64) GHsuffix="macOS_arm64" ;;
-      Darwin:*) GHsuffix="macOS_amd64" ;;
-      Linux:aarch64|Linux:arm64) GHsuffix="linux_arm64" ;;
-      Linux:*) GHsuffix="linux_amd64" ;;
-      *) echo "cell-tools: unsupported cell OS/arch ($GH_OS/$GH_ARCH) for gh install" >&2 ;;
+    GH_FLAVOR="$(uname -s):$(uname -m)"
+    case "$GH_FLAVOR" in
+      Darwin:*) install_gh_release darwin ;;
+      Linux:*) install_gh_release linux ;;
+      *) echo "cell-tools: unsupported cell OS/arch ($GH_FLAVOR) for gh install" >&2 ;;
     esac
-    if [ -n "${GHsuffix:-}" ]; then
-      GH_VER="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest 2>/dev/null | sed -n 's#.*/tag/v\([0-9][0-9.]*\)$#\1#p')"
-      if [ -n "$GH_VER" ]; then
-        curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_${GHsuffix}.tar.gz" \
-          | tar -xz -C "$CELL_BIN" --strip-components=1 "gh_${GH_VER}_${GHsuffix}/bin/gh" 2>/dev/null \
-          || echo "cell-tools: gh tarball fetch failed" >&2
-      else
-        echo "cell-tools: could not resolve latest gh release (no egress to github.com?)" >&2
-      fi
-      chmod +x "$CELL_BIN/gh" 2>/dev/null || true
-      cell_probe_prefixes
-    fi
+    cell_probe_prefixes
   fi
-  local missing=""
-  command -v "$doppler_bin" >/dev/null 2>&1 || missing="doppler"
-  command -v "$gh_bin" >/dev/null 2>&1 || missing="${missing:+$missing }gh"
-  if [ -n "$missing" ]; then
-    echo "error: cell tooling still missing after bootstrap: $missing" >&2
-    echo "hint: provision the runner service PATH (gh, doppler) or install" >&2
-    echo "      manually: brew install gh doppler  — the driver bootstraps to" >&2
-    echo "      $CELL_BIN but needs egress to cli.doppler.com and github.com" >&2
+  # doppler is a HARD requirement (the driver launches the agent through
+  # `doppler run`); gh is not (the driver's own gh uses are guarded — the
+  # surrounding workflows' relay/reply guards own a missing gh). A cell
+  # that cannot get gh still runs the agent; review r1 finding 2.
+  if ! command -v "$doppler_bin" >/dev/null 2>&1; then
+    echo "error: cell tooling still missing after bootstrap: doppler" >&2
+    echo "hint: provision the runner service PATH (doppler) or install" >&2
+    echo "      manually: brew install doppler — the driver bootstraps to" >&2
+    echo "      $CELL_BIN but needs egress to cli.doppler.com" >&2
     return 1
   fi
-  echo "cell-tools: node/doppler/gh present (PATH ok)" >&2
+  if ! command -v "$gh_bin" >/dev/null 2>&1; then
+    echo "::warning::gh unavailable on this cell — the agent runs, but gh-dependent steps (identity, verdicts, relays) degrade" >&2
+  fi
+  echo "cell-tools: node/doppler present (PATH ok; gh: $(command -v "$gh_bin" >/dev/null 2>&1 && echo present || echo absent))" >&2
+}
+# install_gh_release <darwin|linux> — latest gh into $CELL_BIN.
+# Asset shapes are NOT symmetric (review r1 finding 1, verified against
+# cli/cli v2.98.0): Linux ships .tar.gz with members gh_<ver>_<flavor>/bin/gh
+# (strip 2 lands the binary AT $CELL_BIN/gh); macOS ships .zip ONLY — the
+# .tar.gz URL 404s on every mac cell — extracted via unzip -p.
+install_gh_release() {
+  echo "cell-tools: gh missing — installing latest release into $CELL_BIN" >&2
+  mkdir -p "$CELL_BIN"
+  local errlog; errlog="$(mktemp)"
+  GH_VER="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest 2>"$errlog" \
+    | sed -n 's#.*/tag/v\([0-9][0-9.]*\)$#\1#p')"
+  [ -n "$GH_VER" ] || { echo "cell-tools: could not resolve latest gh release:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; return 0; }
+  case "$1" in
+    linux)
+      local flavor; case "$(uname -m)" in aarch64|arm64) flavor="arm64" ;; *) flavor="amd64" ;; esac
+      curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_linux_${flavor}.tar.gz" 2>"$errlog" \
+        | tar -xz -C "$CELL_BIN" --strip-components=2 "gh_${GH_VER}_linux_${flavor}/bin/gh" \
+        || { echo "cell-tools: gh tarball fetch/extract failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; return 0; }
+      ;;
+    darwin)
+      local flavor; case "$(uname -m)" in aarch64|arm64) flavor="arm64" ;; *) flavor="amd64" ;; esac
+      local z; z="$(mktemp)"
+      curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_macOS_${flavor}.zip" -o "$z" 2>"$errlog" \
+        || { echo "cell-tools: gh zip fetch failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; rm -f "$z"; return 0; }
+      # macOS ships unzip; the archive root is gh_<ver>_<flavor>/bin/gh
+      unzip -p "$z" '*/bin/gh' > "$CELL_BIN/gh" 2>"$errlog" \
+        || { echo "cell-tools: gh zip extract failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; rm -f "$z"; return 0; }
+      rm -f "$z"
+      ;;
+  esac
+  chmod +x "$CELL_BIN/gh" 2>/dev/null || echo "cell-tools: chmod on $CELL_BIN/gh failed (extract incomplete?)" >&2
 }
 ensure_cell_tools
 

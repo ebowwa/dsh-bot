@@ -107,6 +107,11 @@ test("a nonzero agent exit still relays the final answer, cleans the job-scoped 
   );
   // zstd stub: the progress streamer's availability guard
   writeFileSync(path.join(bin, "zstd"), "#!/bin/sh\nexit 0\n");
+  // gh stub + explicit BIN seams + empty probe list: the driver's cell-tools
+  // bootstrap must stay hermetic here — no prefix probing (it would shadow
+  // the stub doppler on doppler-equipped machines) and no gh network
+  // install on gh-less machines (review r1 finding 5, extended to doppler).
+  writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 0\n");
   for (const f of readdirSync(bin)) spawnSync("chmod", ["+x", path.join(bin, f)]);
 
   const env = {
@@ -116,6 +121,9 @@ test("a nonzero agent exit still relays the final answer, cleans the job-scoped 
     RUNNER_TEMP: runnerTemp,
     DOPPLER_SERVICE_TOKEN: "stub-token",
     DSH_KEEP_SESSIONS: "", // default path: transcripts must be cleaned
+    GH_BIN: path.join(bin, "gh"),
+    DOPPLER_BIN: path.join(bin, "doppler"),
+    CELL_PROBE_DIRS: "",
   };
   delete env.GH_TOKEN;      // skip the gh-identity block entirely
   delete env.GITHUB_ENV;    // no workflow env file to publish to
@@ -232,6 +240,8 @@ const runLauncher = (extraEnv = {}) => {
     ].join("\n") + "\n",
   );
   writeFileSync(path.join(bin, "zstd"), "#!/bin/sh\nexit 0\n");
+  // same hermeticity as the failure-path test above (review r1 finding 5)
+  writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 0\n");
   for (const f of readdirSync(bin)) spawnSync("chmod", ["+x", path.join(bin, f)]);
 
   const env = {
@@ -243,6 +253,9 @@ const runLauncher = (extraEnv = {}) => {
     DSH_HOME: home,
     DSH_PERSISTENT_HOME: "1",
     STUB_ARGS_FILE: argsFile,
+    GH_BIN: path.join(bin, "gh"),
+    DOPPLER_BIN: path.join(bin, "doppler"),
+    CELL_PROBE_DIRS: "",
   };
   delete env.GH_TOKEN;
   delete env.GITHUB_ENV;
