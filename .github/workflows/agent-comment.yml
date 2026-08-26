@@ -185,6 +185,15 @@ jobs:
         run: |
           set -uo pipefail
           cd "$GITHUB_WORKSPACE"
+          # gh may sit outside the runner service PATH on self-hosted cells
+          # (secondsee lane-lottery, 2026-08-26): same probe as the reply
+          # step below — without it every gh use in THIS step (ack edit,
+          # pre-flight, pr create, review dispatch) can 127 on a gh-less
+          # cell. The list mirrors the driver's CELL_PROBE_DIRS exactly
+          # (doppler prefix + linuxbrew included) and honors its
+          # DSH_CELL_BIN seam (review r2 finding 5, shipper half).
+          command -v gh >/dev/null 2>&1 \
+            || export PATH="${DSH_CELL_BIN:-${HOME:-/root}/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
           # progress edit: agent phase over, shipping
           if [ -n "${ACK_COMMENT_ID:-}" ]; then
             gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${ACK_COMMENT_ID}" -X PATCH               -f body="**dsh agent (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${DSH_RUNNER_NAME:-unknown}
@@ -194,6 +203,39 @@ jobs:
               _(this comment will be edited with the result)_" >/dev/null 2>&1 || true
           fi
           NOTE=""
+          # open_pr <head-branch> <title> <gh-pr-create args...>: create the
+          # PR and dispatch its review with the same degrade-or-loud
+          # treatment as the relay/reply guards — gh missing on the cell is
+          # a ::warning:: plus a precise ship note AFTER a successful push,
+          # never a bare 127 that leaves "branch pushed, no PR, no review"
+          # recorded only as a generic failure (review r2 finding 5).
+          open_pr() {
+            head_b="$1"; title="$2"; shift 2
+            if ! command -v gh >/dev/null 2>&1; then
+              echo "::warning::gh unavailable on this cell — $head_b pushed, PR NOT opened (open it from the branch); no review dispatched" >&2
+              echo "pushed $head_b (gh unavailable on cell: PR not opened)"
+              return 0
+            fi
+            PR_OUT="$(gh pr create --repo "$GITHUB_REPOSITORY" --head "$head_b" \
+              --title "$title" "$@" 2>&1 || true)"
+            case "$PR_OUT" in
+              https://*)
+                PR_NUM="$(gh pr view "$head_b" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)"
+                if [ -n "$PR_NUM" ] && [ -n "$REVIEW_WORKFLOW" ]; then
+                  if gh workflow run "$REVIEW_WORKFLOW" --repo "$GITHUB_REPOSITORY" -f pr="$PR_NUM" 2>/dev/null; then
+                    echo "shipped [$head_b]($PR_OUT); review dispatched"
+                  else
+                    echo "review dispatch failed for #$PR_NUM (run: gh workflow run $REVIEW_WORKFLOW -f pr=$PR_NUM)" >&2
+                    echo "shipped [$head_b]($PR_OUT)"
+                  fi
+                else
+                  echo "shipped [$head_b]($PR_OUT)"
+                fi;;
+              *)
+                echo "gh pr create failed for $head_b: $PR_OUT" >&2
+                echo "pushed $head_b (PR create failed: $(echo "$PR_OUT" | head -n1))";;
+            esac
+          }
           command -v git >/dev/null 2>&1 || { echo "no git; skip"; echo "" > "$RUNNER_TEMP/dsh-ship-note.txt"; exit 0; }
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -220,20 +262,8 @@ jobs:
           for B in $(git for-each-ref refs/heads/dsh --format='%(refname:short)'); do
             if ! grep -qx "$B" "$RUNNER_TEMP/dsh-after-dsh-branches" 2>/dev/null; then
               if git push -u origin "$B" 2>&1; then
-                PR_OUT="$(gh pr create --repo "$GITHUB_REPOSITORY" --head "$B" \
-                  --title "dsh: ${DSH_TASK_TITLE:-$B}" \
-                  --body "Automated PR from agent run ${GITHUB_RUN_ID} (branch pushed by shipper)." 2>&1 || true)"
-                case "$PR_OUT" in https://*)
-                  NOTE="${NOTE:+$NOTE; }shipped [$B]($PR_OUT)"
-                  PR_NUM="$(gh pr view "$B" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)"
-                  if [ -n "$PR_NUM" ] && [ -n "$REVIEW_WORKFLOW" ]; then
-                    gh workflow run "$REVIEW_WORKFLOW" --repo "$GITHUB_REPOSITORY" -f pr="$PR_NUM" 2>/dev/null \
-                      && NOTE="$NOTE; review dispatched" \
-                      || echo "review dispatch failed for #$PR_NUM (run: gh workflow run $REVIEW_WORKFLOW -f pr=$PR_NUM)" >&2
-                  fi;;
-                  *)
-                  echo "gh pr create failed for $B: $PR_OUT" >&2
-                  NOTE="${NOTE:+$NOTE; }pushed $B (PR create failed: $(echo "$PR_OUT" | head -n1))";; esac
+                NOTE="${NOTE:+$NOTE; }$(open_pr "$B" "dsh: ${DSH_TASK_TITLE:-$B}" \
+                  --body "Automated PR from agent run ${GITHUB_RUN_ID} (branch pushed by shipper).")"
               fi
             fi
           done
@@ -258,20 +288,8 @@ jobs:
                 echo
                 node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$RUNNER_TEMP/dsh-agent-output.txt" 2>/dev/null || true
               } > "$RUNNER_TEMP/dsh-pr-body.md"
-              PR_OUT="$(gh pr create --repo "$GITHUB_REPOSITORY" --head "$BRANCH" \
-                --title "dsh: ${DSH_TASK_TITLE:-agent changes}" \
-                --body-file "$RUNNER_TEMP/dsh-pr-body.md" 2>&1 || true)"
-              case "$PR_OUT" in https://*)
-                NOTE="${NOTE:+$NOTE; }shipped [$BRANCH]($PR_OUT)"
-                PR_NUM="$(gh pr view "$BRANCH" --repo "$GITHUB_REPOSITORY" --json number --jq .number 2>/dev/null || true)"
-                if [ -n "$PR_NUM" ] && [ -n "$REVIEW_WORKFLOW" ]; then
-                  gh workflow run "$REVIEW_WORKFLOW" --repo "$GITHUB_REPOSITORY" -f pr="$PR_NUM" 2>/dev/null \
-                    && NOTE="$NOTE; review dispatched" \
-                    || echo "review dispatch failed for #$PR_NUM (run: gh workflow run $REVIEW_WORKFLOW -f pr=$PR_NUM)" >&2
-                fi;;
-                *)
-                echo "gh pr create failed for $BRANCH: $PR_OUT" >&2
-                NOTE="${NOTE:+$NOTE; }pushed $BRANCH (PR create failed: $(echo "$PR_OUT" | head -n1))";; esac
+              NOTE="${NOTE:+$NOTE; }$(open_pr "$BRANCH" "dsh: ${DSH_TASK_TITLE:-agent changes}" \
+                --body-file "$RUNNER_TEMP/dsh-pr-body.md")"
             else
               NOTE="${NOTE:+$NOTE; }WARNING: found changes but push failed"
             fi
@@ -290,6 +308,20 @@ jobs:
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail
+          # gh may sit outside the runner service PATH on self-hosted cells
+          # (secondsee lane-lottery, 2026-08-26): probe the driver's
+          # persistent prefix + brew prefixes before giving up. The reply is
+          # the user-facing output channel, so a missing gh downgrades to a
+          # warning pointing at the run log (the answer is tee'd there by
+          # the agent step) instead of a bare 127. The list mirrors the
+          # driver's CELL_PROBE_DIRS exactly (doppler prefix + linuxbrew
+          # included) and honors its DSH_CELL_BIN seam.
+          command -v gh >/dev/null 2>&1 \
+            || export PATH="${DSH_CELL_BIN:-${HOME:-/root}/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
+          command -v gh >/dev/null 2>&1 || {
+            echo "::warning::gh unavailable on this cell — reply NOT posted to the thread; the agent's answer is in the run log"
+            exit 0
+          }
           {
             echo "**dsh agent (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${DSH_RUNNER_NAME:-unknown}"
             echo

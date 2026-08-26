@@ -23,6 +23,11 @@
 #   DSH_SUBAGENT_MODEL    subagent/subagent_fork children's model, "provider/model"
 #                         (unset = inherit the head's route)
 #   DOPPLER_SERVICE_TOKEN required by `doppler run`
+#   DSH_CELL_BIN        persistent prefix for the cell-tool bootstrap
+#                       (default $HOME/.dsh-bot-bin); the relay/reply
+#                       guards in the workflows honor the same seam. gh
+#                       is NOT a hard driver requirement (soft: warn and
+#                       run — the workflows own gh absence); doppler is.
 #
 # Comment-bot reply wiring (used by dsh-agent-comment.yml):
 #   REPLY_TARGET    human label of the thread to answer, e.g. "PR #123"
@@ -118,6 +123,157 @@ fi
 # Hostnames the scrubber redacts on output surfaces beyond the generic
 # patterns; supplied by the consumer's (private) workflow config.
 export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
+
+# --- 0. cell tooling: probe prefixes, then bootstrap missing tools --------
+# Lane-lottery defect (secondsee 2026-08-26, runs 32944063408 / 32941451004):
+# widening runner-labels to ["self-hosted"] lets reviews land on ANY cell in
+# a fleet, and two of three secondsee cells had no gh/doppler on the runner
+# SERVICE PATH (mac launchd safe-path class: tools exist under a brew prefix
+# the service never sees, or were never installed) — the review died at the
+# first `doppler run` with a bare "command not found" (line 227 of v1.27.0).
+# node stays a hard requirement (this driver itself runs on it); doppler and
+# gh are ensured here, cheapest first:
+#   1. probe known prefixes onto PATH (fixes the regressed-PATH case with
+#      zero network),
+#   2. install into a PERSISTENT user prefix (~/.dsh-bot-bin — survives
+#      steps and runs, so the first hardened run pays the cost and later
+#      runs just find the binaries),
+#   3. fail LOUD with the provisioning hint — never limp on half a
+#      toolchain (a missing doppler at `doppler run` means no ZAI_API_KEY
+#      and a dead agent; a missing gh means no identity, no verdict).
+CELL_BIN="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}"
+# Probe order: the persistent cell prefix, the brew prefixes a mac/linux
+# runner service PATH may have regressed away from, and doppler's own
+# default. CELL_PROBE_DIRS is a TEST SEAM (space list) — callers never set
+# it; the offline suite needs to rule out the dev machine's real prefixes.
+CELL_PROBE_DIRS="${CELL_PROBE_DIRS:-$CELL_BIN /opt/homebrew/bin /usr/local/bin $HOME/.doppler/bin /home/linuxbrew/.linuxbrew/bin}"
+CELL_ADDED_PREFIXES=""
+cell_probe_prefixes() {
+  local p
+  for p in $CELL_PROBE_DIRS; do
+    [ -d "$p" ] || continue
+    case ":$PATH:" in *":$p:"*) ;; *)
+      PATH="$p:$PATH"
+      CELL_ADDED_PREFIXES="${CELL_ADDED_PREFIXES:+$CELL_ADDED_PREFIXES }$p"
+      ;;
+    esac
+  done
+  export PATH
+}
+ensure_cell_tools() {
+  # *_BIN are TEST SEAMS only — callers never set them. Explicit paths let
+  # the offline suite construct a tool's absence; the dsh lanes install
+  # real CLIs in system dirs, so PATH restriction alone cannot (the
+  # resolve-push-token suite earned this rule the hard way, gates run
+  # 32933615526).
+  local node_bin="${NODE_BIN:-node}" doppler_bin="${DOPPLER_BIN:-doppler}" gh_bin="${GH_BIN:-gh}"
+  cell_probe_prefixes
+  # node is hard, but checked AFTER the probe: a cell whose node lives only
+  # under a brew prefix the service PATH regressed away from (the exact
+  # incident class this section handles for gh/doppler) must not die one
+  # line before the probe that would have found it (review r2 finding 6).
+  command -v "$node_bin" >/dev/null 2>&1 \
+    || { echo "error: node missing on this cell — the driver itself needs it; provision the runner" >&2; return 1; }
+  # Failed-install stderr tails, surfaced in the final hint (a bare
+  # "fetch failed" hides 404s vs no-egress — review r1 finding 4).
+  local errlog; errlog="$(mktemp)"
+  if ! command -v "$doppler_bin" >/dev/null 2>&1; then
+    echo "cell-tools: doppler missing — installing (official install.sh --install-path $CELL_BIN)" >&2
+    mkdir -p "$CELL_BIN"
+    # install.sh honors --install-path and upgrades an existing binary in
+    # place; verified against the script source (arg parse, Feb 2026).
+    # The capture binds to CURL: a `2>` on the pipeline tail captures sh's
+    # stderr instead, leaving the hint empty of the transport error that
+    # distinguishes 404 from no-egress (review r2 finding 3). sh's own
+    # stderr flows to the job log unredirected.
+    if ! curl -fsSL https://cli.doppler.com/install.sh 2>"$errlog" | sh -s -- --install-path "$CELL_BIN"; then
+      echo "cell-tools: doppler install.sh failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2
+    fi
+    cell_probe_prefixes
+  fi
+  if ! command -v "$gh_bin" >/dev/null 2>&1; then
+    GH_FLAVOR="$(uname -s):$(uname -m)"
+    case "$GH_FLAVOR" in
+      Darwin:*) install_gh_release darwin ;;
+      Linux:*) install_gh_release linux ;;
+      *) echo "cell-tools: unsupported cell OS/arch ($GH_FLAVOR) for gh install" >&2 ;;
+    esac
+    cell_probe_prefixes
+  fi
+  # Publish additions to later steps in the SAME job (shipper, relay,
+  # reply): GITHUB_PATH is the sanctioned per-line mechanism. The shell
+  # export dies with this step; workflow steps after us must also find
+  # gh/doppler (a missing gh at the relay was the second 127 in the
+  # secondsee failures). ONCE, HERE — not inside cell_probe_prefixes,
+  # which runs up to 3× per bare cell (initial probe, post-doppler,
+  # post-gh) and appended the same prefixes on every call (review r2
+  # finding 4).
+  if [ -n "$CELL_ADDED_PREFIXES" ] && [ -n "${GITHUB_PATH:-}" ]; then
+    for p in $CELL_ADDED_PREFIXES; do echo "$p" >> "$GITHUB_PATH"; done
+    # and the resolved prefix itself, job-ambient: the workflow guards'
+    # ${DSH_CELL_BIN:-...} probe only sees it if this step publishes it
+    # (review approve-round finding 3).
+    [ -n "${GITHUB_ENV:-}" ] && printf 'DSH_CELL_BIN=%s\n' "$CELL_BIN" >> "$GITHUB_ENV"
+  fi
+  # doppler is a HARD requirement (the driver launches the agent through
+  # `doppler run`); gh is not (the driver's own gh uses are guarded — the
+  # surrounding workflows' relay/reply guards own a missing gh). A cell
+  # that cannot get gh still runs the agent; review r1 finding 2.
+  if ! command -v "$doppler_bin" >/dev/null 2>&1; then
+    echo "error: cell tooling still missing after bootstrap: doppler" >&2
+    echo "hint: provision the runner service PATH (doppler) or install" >&2
+    echo "      manually: brew install doppler — the driver bootstraps to" >&2
+    echo "      $CELL_BIN but needs egress to cli.doppler.com" >&2
+    return 1
+  fi
+  if ! command -v "$gh_bin" >/dev/null 2>&1; then
+    echo "::warning::gh unavailable on this cell — the agent runs, but gh-dependent steps (identity, verdicts, relays) degrade" >&2
+  fi
+  echo "cell-tools: node/doppler present (PATH ok; gh: $(command -v "$gh_bin" >/dev/null 2>&1 && echo present || echo absent))" >&2
+}
+# install_gh_release <darwin|linux> — latest gh into $CELL_BIN.
+# Asset shapes are NOT symmetric (review r1 finding 1, verified against
+# cli/cli v2.98.0): Linux ships .tar.gz with members gh_<ver>_<flavor>/bin/gh
+# (strip 2 lands the binary AT $CELL_BIN/gh); macOS ships .zip ONLY — the
+# .tar.gz URL 404s on every mac cell — extracted via unzip -p.
+install_gh_release() {
+  echo "cell-tools: gh missing — installing latest release into $CELL_BIN" >&2
+  mkdir -p "$CELL_BIN"
+  local errlog; errlog="$(mktemp)"
+  # || true INSIDE the substitution: the driver runs under set -euo
+  # pipefail, and an assignment's status is its substitution's — a failed
+  # resolve (no egress) would abort the whole driver HERE, before the
+  # soft-gh warning / the doppler hard-fail hint ever print (residual on
+  # 3f690a2, verified in the driver's shell context). The empty-string
+  # fallthrough below is the intended degradation.
+  GH_VER="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest 2>"$errlog" \
+    | sed -n 's#.*/tag/v\([0-9][0-9.]*\)$#\1#p' || true)"
+  [ -n "$GH_VER" ] || { echo "cell-tools: could not resolve latest gh release:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; return 0; }
+  case "$1" in
+    linux)
+      local flavor; case "$(uname -m)" in aarch64|arm64) flavor="arm64" ;; *) flavor="amd64" ;; esac
+      curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_linux_${flavor}.tar.gz" 2>"$errlog" \
+        | tar -xz -C "$CELL_BIN" --strip-components=2 "gh_${GH_VER}_linux_${flavor}/bin/gh" \
+        || { echo "cell-tools: gh tarball fetch/extract failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; return 0; }
+      ;;
+    darwin)
+      local flavor; case "$(uname -m)" in aarch64|arm64) flavor="arm64" ;; *) flavor="amd64" ;; esac
+      local z; z="$(mktemp)"
+      curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_macOS_${flavor}.zip" -o "$z" 2>"$errlog" \
+        || { echo "cell-tools: gh zip fetch failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; rm -f "$z"; return 0; }
+      # macOS ships unzip; the archive root is gh_<ver>_<flavor>/bin/gh.
+      # rm the target on failure too: the redirect creates it even when
+      # unzip fails — an empty artifact must not linger in the persistent
+      # prefix.
+      unzip -p "$z" '*/bin/gh' > "$CELL_BIN/gh" 2>"$errlog" \
+        || { echo "cell-tools: gh zip extract failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; rm -f "$z" "$CELL_BIN/gh"; return 0; }
+      rm -f "$z"
+      ;;
+  esac
+  chmod +x "$CELL_BIN/gh" 2>/dev/null || echo "cell-tools: chmod on $CELL_BIN/gh failed (extract incomplete?)" >&2
+}
+ensure_cell_tools
+
 
 # Per-run model: "provider/model" (e.g. zai/glm-5.2). Settings are
 # REGENERATED from the pristine template every run (never regex-patched in
