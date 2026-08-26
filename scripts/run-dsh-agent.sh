@@ -159,14 +159,6 @@ cell_probe_prefixes() {
     esac
   done
   export PATH
-  # Publish additions to later steps in the SAME job (shipper, relay,
-  # reply): GITHUB_PATH is the sanctioned per-line mechanism. The shell
-  # export dies with this step; workflow steps after us must also find
-  # gh/doppler (a missing gh at the relay was the second 127 in the
-  # secondsee failures).
-  if [ -n "$CELL_ADDED_PREFIXES" ] && [ -n "${GITHUB_PATH:-}" ]; then
-    for p in $CELL_ADDED_PREFIXES; do echo "$p" >> "$GITHUB_PATH"; done
-  fi
 }
 ensure_cell_tools() {
   # *_BIN are TEST SEAMS only — callers never set them. Explicit paths let
@@ -175,9 +167,13 @@ ensure_cell_tools() {
   # resolve-push-token suite earned this rule the hard way, gates run
   # 32933615526).
   local node_bin="${NODE_BIN:-node}" doppler_bin="${DOPPLER_BIN:-doppler}" gh_bin="${GH_BIN:-gh}"
+  cell_probe_prefixes
+  # node is hard, but checked AFTER the probe: a cell whose node lives only
+  # under a brew prefix the service PATH regressed away from (the exact
+  # incident class this section handles for gh/doppler) must not die one
+  # line before the probe that would have found it (review r2 finding 6).
   command -v "$node_bin" >/dev/null 2>&1 \
     || { echo "error: node missing on this cell — the driver itself needs it; provision the runner" >&2; return 1; }
-  cell_probe_prefixes
   # Failed-install stderr tails, surfaced in the final hint (a bare
   # "fetch failed" hides 404s vs no-egress — review r1 finding 4).
   local errlog; errlog="$(mktemp)"
@@ -186,7 +182,11 @@ ensure_cell_tools() {
     mkdir -p "$CELL_BIN"
     # install.sh honors --install-path and upgrades an existing binary in
     # place; verified against the script source (arg parse, Feb 2026).
-    if ! curl -fsSL https://cli.doppler.com/install.sh | sh -s -- --install-path "$CELL_BIN" 2>"$errlog"; then
+    # The capture binds to CURL: a `2>` on the pipeline tail captures sh's
+    # stderr instead, leaving the hint empty of the transport error that
+    # distinguishes 404 from no-egress (review r2 finding 3). sh's own
+    # stderr flows to the job log unredirected.
+    if ! curl -fsSL https://cli.doppler.com/install.sh 2>"$errlog" | sh -s -- --install-path "$CELL_BIN"; then
       echo "cell-tools: doppler install.sh failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2
     fi
     cell_probe_prefixes
@@ -199,6 +199,17 @@ ensure_cell_tools() {
       *) echo "cell-tools: unsupported cell OS/arch ($GH_FLAVOR) for gh install" >&2 ;;
     esac
     cell_probe_prefixes
+  fi
+  # Publish additions to later steps in the SAME job (shipper, relay,
+  # reply): GITHUB_PATH is the sanctioned per-line mechanism. The shell
+  # export dies with this step; workflow steps after us must also find
+  # gh/doppler (a missing gh at the relay was the second 127 in the
+  # secondsee failures). ONCE, HERE — not inside cell_probe_prefixes,
+  # which runs up to 3× per bare cell (initial probe, post-doppler,
+  # post-gh) and appended the same prefixes on every call (review r2
+  # finding 4).
+  if [ -n "$CELL_ADDED_PREFIXES" ] && [ -n "${GITHUB_PATH:-}" ]; then
+    for p in $CELL_ADDED_PREFIXES; do echo "$p" >> "$GITHUB_PATH"; done
   fi
   # doppler is a HARD requirement (the driver launches the agent through
   # `doppler run`); gh is not (the driver's own gh uses are guarded — the

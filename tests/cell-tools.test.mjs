@@ -21,6 +21,12 @@
 // the REAL asset shapes (linux .tar.gz with bin/ nested two levels,
 // macOS .zip ONLY — the r0 code 404'd on mac and mis-stripped on linux,
 // review r1 finding 1). These tests fail without the fix.
+//
+// Review r2 (verdict of 2026-08-26T08:33Z) pins: the doppler-install
+// stderr capture bound to curl with the tail asserted INSIDE the hint
+// (finding 3), GITHUB_PATH published exactly once across the 3 probe
+// calls a bare cell drives (finding 4), and node checked after the
+// probe that can rescue it (finding 6).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -179,20 +185,37 @@ test("regressed service PATH: tools exist under a probeable prefix — probing f
   } finally { clean(t, prefix); }
 });
 
-test("cell_probe_prefixes publishes every added dir to GITHUB_PATH (later steps must find gh)", () => {
+test("bare cell: prefix additions publish to GITHUB_PATH EXACTLY ONCE (3 probe calls, no triplicate — r2 finding 4)", () => {
   const home = mkdtempSync(path.join(tmpdir(), "celltools-home-"));
   const gp = path.join(home, "github-path");
   writeFileSync(gp, "");
-  const cellBin = path.join(home, ".dsh-bot-bin");
-  writeTool(cellBin, "gh");
+  const p1 = mkdtempSync(path.join(tmpdir(), "celltools-prefix-"));
+  const cellBin = path.join(home, "cellbin"); // does NOT exist yet — the
+  // doppler installer creates it, so only the POST-INSTALL re-probe adds it
   const t = runFn({
-    fn: "cell_probe_prefixes",
-    extra: `HOME='${home}' CELL_PROBE_DIRS='${cellBin}' GITHUB_PATH='${gp}'`,
+    fn: "ensure_cell_tools",
+    // doppler missing (seam path into the not-yet-created prefix) →
+    // install → re-probe; gh missing + failing resolve → third probe:
+    // the exact 3-call sequence a bare cell drives through the function.
+    extra: `HOME='${home}' CELL_BIN='${cellBin}' CELL_PROBE_DIRS='${p1} ${cellBin}' DOPPLER_BIN='${cellBin}/doppler' GH_BIN='/nonexistent/gh' GITHUB_PATH='${gp}'`,
+    curlShim: `#!/bin/sh
+case "$*" in
+  *cli.doppler.com/install.sh*)
+    printf '#!/bin/sh\\ndir=""\\nwhile [ $# -gt 0 ]; do [ "$1" = "--install-path" ] && dir="$2"; shift; done\\n[ -n "$dir" ] || exit 1\\nmkdir -p "$dir"\\nprintf "#!/bin/sh\\\\nexit 0\\\\n" > "$dir/doppler"\\nchmod +x "$dir/doppler"\\n'
+    ;;
+  *releases/latest*) echo "curl: (7) no route to host" >&2; exit 7 ;;
+  *) echo "unexpected curl call: $*" >&2; exit 1;;
+esac
+`,
   });
   try {
-    assert.equal(t.r.status, 0, t.r.stderr);
-    assert.equal(readFileSync(gp, "utf8"), cellBin + "\n");
-  } finally { clean(t); }
+    assert.equal(t.r.status, 0, t.r.stderr); // doppler installed; gh stays soft
+    assert.equal(
+      readFileSync(gp, "utf8"),
+      `${p1}\n${cellBin}\n`,
+      "each probed-in prefix must appear exactly once — the per-call publish appended them on every probe (p1 ×3, cellBin ×2 on the r1 code)",
+    );
+  } finally { clean(t, p1); }
 });
 
 test("missing node fails loud with the provisioning hint (hard requirement)", () => {
@@ -201,6 +224,23 @@ test("missing node fails loud with the provisioning hint (hard requirement)", ()
     assert.notEqual(t.r.status, 0);
     assert.match(t.r.stderr, /node missing on this cell/);
   } finally { clean(t); }
+});
+
+test("node lives only under a probeable prefix: the probe finds it BEFORE the hard fail (r2 finding 6)", () => {
+  const prefix = mkdtempSync(path.join(tmpdir(), "celltools-prefix-"));
+  // Absence constructed by NAME (a stub name no dir on the pre-probe PATH
+  // carries), the BIN-seam way — never by restricting PATH (the lanes
+  // install the real CLIs in system dirs; tests-lint rejects that).
+  writeTool(prefix, "node9-stub");
+  const t = runFn({
+    fn: "ensure_cell_tools", tools: ["doppler", "gh"],
+    extra: `CELL_BIN=/tmp/celltools-none CELL_PROBE_DIRS='${prefix}' NODE_BIN='node9-stub'`,
+  });
+  try {
+    assert.equal(t.r.status, 0, t.r.stderr);
+    assert.match(t.r.stdout + t.r.stderr, /node\/doppler present \(PATH ok; gh: present\)/);
+    assert.doesNotMatch(t.r.stderr, /node missing on this cell/);
+  } finally { clean(t, prefix); }
 });
 
 test("missing doppler: official installer invoked, binary lands in the persistent prefix", () => {
@@ -239,9 +279,10 @@ test("doppler present + gh uninstallable: agent still runs (gh is soft — warni
   } finally { clean(t); }
 });
 
-test("no egress + doppler missing: fails LOUD with stderr tail (never limps)", () => {
+test("driver context (set -euo pipefail), no egress + doppler missing: fails LOUD and the hint carries curl's tail IN it (r2 finding 3)", () => {
   const t = runFn({
-    fn: "ensure_cell_tools", tools: ["node", "gh"],
+    fn: "ensure_cell_tools", strict: true,
+    tools: ["node", "gh"],
     curlShim: "#!/bin/sh\necho 'simulated: no route to host' >&2\nexit 7\n",
     extra: "CELL_BIN=/tmp/celltools-none CELL_PROBE_DIRS='' DOPPLER_BIN=/nonexistent/doppler",
   });
@@ -249,7 +290,13 @@ test("no egress + doppler missing: fails LOUD with stderr tail (never limps)", (
     assert.notEqual(t.r.status, 0);
     assert.match(t.r.stderr, /still missing after bootstrap: doppler/);
     assert.match(t.r.stderr, /provision the runner service PATH/);
-    assert.match(t.r.stderr, /simulated: no route to host/, "install stderr tail surfaces in the failure");
+    // The transport error must surface INSIDE the hint (after its header),
+    // not by leaking from an unredirected curl. The r1 code bound 2> to
+    // the pipeline TAIL (sh): under pipefail the branch fired but the
+    // tail printed EMPTY; without pipefail the branch never fired at all
+    // and the old assertion passed on the leak. Both holes closed here —
+    // strict mode for the branch, positional match for the capture.
+    assert.match(t.r.stderr, /install\.sh failed:\n\s+simulated: no route to host/);
   } finally { clean(t); }
 });
 

@@ -155,6 +155,82 @@ test("a nonzero agent exit still relays the final answer, cleans the job-scoped 
   rmSync(dir, { recursive: true, force: true });
 });
 
+// --- 2b. soft gh end-to-end: the WHOLE driver must survive a failed gh
+// bootstrap and still launch the agent (review r2 finding 2's
+// integration half). The extracted-function pins in cell-tools.test.mjs
+// prove ensure_cell_tools degrades under `set -euo pipefail`; this test
+// proves the REAL script — flags, early sections, doppler exec and all —
+// reaches the agent path instead of dying with curl's exit code. On the
+// r1 code (GH_VER resolve unguarded) the driver aborted with curl's bare
+// exit 7 before the warning, before the agent.
+
+test("gh uninstallable (no egress): the full driver still launches the agent and exits with ITS code, not curl's (review r2 finding 2)", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-agent-softgh-"));
+  const bin = path.join(dir, "bin");
+  const home = path.join(dir, "home");
+  const runnerTemp = path.join(dir, "runner");
+  mkdirSync(bin);
+  mkdirSync(home);
+  mkdirSync(runnerTemp);
+
+  // doppler stub: `doppler run --token <tok> -- <cmd...>` -> exec <cmd...>
+  writeFileSync(
+    path.join(bin, "doppler"),
+    "#!/bin/sh\nshift; shift; shift; shift\nexec \"$@\"\n",
+  );
+  // dsh stub: answers --version, then succeeds with a final answer
+  writeFileSync(
+    path.join(bin, "dsh"),
+    [
+      "#!/bin/sh",
+      'case "$1" in --version) echo "dsh-stub-0.0.0" >&2; exit 0;; esac',
+      "echo STUB-FINAL-ANSWER",
+      "exit 0",
+    ].join("\n") + "\n",
+  );
+  writeFileSync(path.join(bin, "zstd"), "#!/bin/sh\nexit 0\n");
+  // NO gh stub: GH_BIN points at /nonexistent — gh is absent everywhere.
+  // curl shim: no egress — the gh version-resolve dies with curl's exit 7
+  // and a stderr message the resolve-failure path must surface as a tail.
+  writeFileSync(
+    path.join(bin, "curl"),
+    "#!/bin/sh\necho 'curl: (7) simulated: no route to host' >&2\nexit 7\n",
+  );
+  for (const f of readdirSync(bin)) spawnSync("chmod", ["+x", path.join(bin, f)]);
+
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: dir,
+    RUNNER_TEMP: runnerTemp,
+    DOPPLER_SERVICE_TOKEN: "stub-token",
+    DSH_HOME: home,
+    DSH_PERSISTENT_HOME: "1",
+    GH_BIN: "/nonexistent/gh",
+    DOPPLER_BIN: path.join(bin, "doppler"),
+    CELL_PROBE_DIRS: "",
+  };
+  delete env.GH_TOKEN;      // skip the gh-identity block entirely
+  delete env.GITHUB_ENV;    // no workflow env file to publish to
+  delete env.GITHUB_PATH;   // no workflow path file to append to
+  delete env.DSH_SESSION_PATH_FILE;
+
+  const proc = spawnSync("bash", [SCRIPT, "soft-gh integration test task"], {
+    encoding: "utf8",
+    env,
+    timeout: 60_000,
+  });
+
+  assert.notEqual(proc.status, 7, "the driver must NOT die with curl's exit code");
+  assert.equal(proc.status, 0, `the agent ran and exited 0; stderr tail: ${proc.stderr.split("\n").slice(-6).join("\n")}`);
+  assert.match(proc.stdout, /STUB-FINAL-ANSWER/, "the driver must reach the agent — its final answer is relayed");
+  assert.match(proc.stderr, /could not resolve latest gh release:/, "the resolve failure must say so");
+  assert.match(proc.stderr, /curl: \(7\) simulated: no route to host/, "curl's stderr tail must surface in the hint (404 vs no-egress)");
+  assert.match(proc.stderr, /::warning::gh unavailable on this cell/, "gh is soft: warning, not death");
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
 // --- 3. the class guard: no comment inside a backslash continuation -----
 
 test("scripts never place a comment line inside a backslash continuation (run 32797020619 class)", () => {
