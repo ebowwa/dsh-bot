@@ -165,9 +165,11 @@ jobs:
           # persistent prefix + brew prefixes before giving up. A missing gh
           # here degrades to a warning — the verdict itself is in the run
           # log (tee'd by the review step), and this step's failure would
-          # only bury it under a bare 127.
+          # only bury it under a bare 127. The list mirrors the driver's
+          # CELL_PROBE_DIRS exactly (doppler prefix + linuxbrew included)
+          # and honors its DSH_CELL_BIN seam.
           command -v gh >/dev/null 2>&1 \
-            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$PATH"
+            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
           command -v gh >/dev/null 2>&1 || {
             echo "::warning::gh unavailable on this cell — review summary NOT relayed to the thread; see the run log"
             exit 0

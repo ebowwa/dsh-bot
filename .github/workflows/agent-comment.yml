@@ -295,9 +295,11 @@ jobs:
           # persistent prefix + brew prefixes before giving up. The reply is
           # the user-facing output channel, so a missing gh downgrades to a
           # warning pointing at the run log (the answer is tee'd there by
-          # the agent step) instead of a bare 127.
+          # the agent step) instead of a bare 127. The list mirrors the
+          # driver's CELL_PROBE_DIRS exactly (doppler prefix + linuxbrew
+          # included) and honors its DSH_CELL_BIN seam.
           command -v gh >/dev/null 2>&1 \
-            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$PATH"
+            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
           command -v gh >/dev/null 2>&1 || {
             echo "::warning::gh unavailable on this cell — reply NOT posted to the thread; the agent's answer is in the run log"
             exit 0

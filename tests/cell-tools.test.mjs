@@ -49,7 +49,14 @@ const writeTool = (dir, name) => {
 // suite would leave stale /tmp entries in every later step's PATH
 // (review r1 finding 3). The dedicated GITHUB_PATH test points its own
 // at tmp.
-const runFn = ({ fn, args = "", tools = [], extra = "", curlShim = null, unzipShim = null } = {}) => {
+//
+// strict: true runs the same script under `bash -euo pipefail` — the
+// DRIVER's own shell context, which the plain harness omits. A failed
+// command substitution feeding an assignment aborts there while the
+// plain harness sails past it (the residual on 3f690a2: a no-egress
+// version-resolve killed the driver before the soft-gh warning / the
+// doppler hint could print).
+const runFn = ({ fn, args = "", tools = [], extra = "", curlShim = null, unzipShim = null, strict = false } = {}) => {
   const home = mkdtempSync(path.join(tmpdir(), "celltools-home-"));
   const shims = mkdtempSync(path.join(tmpdir(), "celltools-shims-"));
   for (const t of tools) writeTool(shims, t);
@@ -62,7 +69,9 @@ const runFn = ({ fn, args = "", tools = [], extra = "", curlShim = null, unzipSh
   const defs = fn === "ensure_cell_tools"
     ? extractFunction("cell_probe_prefixes") + extractFunction("install_gh_release") + extractFunction(fn)
     : extractFunction(fn);
-  const r = spawnSync("bash", ["-c", `${extra}\n${defs}\n${fn} ${args}`], { env, encoding: "utf8" });
+  const r = strict
+    ? spawnSync("bash", ["-euo", "pipefail", "-c", `CELL_ADDED_PREFIXES=""\n${extra}\n${defs}\n${fn} ${args}`], { env, encoding: "utf8" })
+    : spawnSync("bash", ["-c", `${extra}\n${defs}\n${fn} ${args}`], { env, encoding: "utf8" });
   return { r, home, shims };
 };
 
@@ -277,4 +286,67 @@ test("install_gh_release (darwin): zip asset (macOS ships NO tarball — r0 404)
     assert.match(content, /exit 0/, "extracted the actual member, not an error page");
     assert.doesNotMatch(t.r.stdout + t.r.stderr, /failed/);
   } finally { clean(t, fdir); }
+});
+
+// --- residuals on 3f690a2, found while verifying the sibling fix -------
+// The DRIVER runs ensure_cell_tools under `set -euo pipefail`; these run
+// the same extracted functions in exactly that shell context. On 3f690a2
+// a no-egress version-resolve aborted the driver at the GH_VER
+// assignment — before the soft-gh warning (soft test) and before the
+// doppler hard-fail hint (loud test) could print. The abort was silent:
+// no hint, no agent launch.
+
+test("driver context (set -euo pipefail), gh resolve fails: the soft-gh warning must still print (residual on 3f690a2)", () => {
+  const t = runFn({
+    fn: "ensure_cell_tools", strict: true,
+    tools: ["node", "doppler"],
+    curlShim: "#!/bin/sh\necho 'curl: (7) no route to host' >&2\nexit 7\n",
+    extra: "CELL_BIN=/tmp/celltools-none CELL_PROBE_DIRS='' GH_BIN=/nonexistent/gh",
+  });
+  try {
+    assert.equal(t.r.status, 0, `must exit 0 (gh is soft), stderr: ${t.r.stderr}`);
+    assert.match(t.r.stderr, /::warning::gh unavailable on this cell/);
+    assert.match(t.r.stderr, /could not resolve latest gh release:/);
+  } finally { clean(t); }
+});
+
+test("driver context (set -euo pipefail), no egress + doppler missing: the loud hint must still print (residual on 3f690a2)", () => {
+  const t = runFn({
+    fn: "ensure_cell_tools", strict: true,
+    tools: ["node", "gh"],
+    curlShim: "#!/bin/sh\necho 'curl: (7) no route to host' >&2\nexit 7\n",
+    extra: "CELL_BIN=/tmp/celltools-none CELL_PROBE_DIRS='' DOPPLER_BIN=/nonexistent/doppler GH_BIN=/nonexistent/gh",
+  });
+  try {
+    assert.notEqual(t.r.status, 0);
+    assert.match(t.r.stderr, /still missing after bootstrap: doppler/);
+    assert.match(t.r.stderr, /provision the runner service PATH/);
+  } finally { clean(t); }
+});
+
+test("failed darwin extract leaves NO empty gh artifact in the persistent prefix (residual tidy on 3f690a2)", () => {
+  const home = mkdtempSync(path.join(tmpdir(), "celltools-home-"));
+  const cellBin = path.join(home, "cellbin");
+  const t = runFn({
+    fn: "install_gh_release", args: "darwin",
+    extra: `HOME='${home}' CELL_BIN='${cellBin}'`,
+    // resolve succeeds, download "succeeds" but the payload is not a zip:
+    // unzip fails, and the > redirect has already created $CELL_BIN/gh
+    curlShim: `#!/bin/sh
+out=""
+prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+case "$*" in
+  *releases/latest*) echo "https://github.com/cli/cli/releases/tag/v9.9.9" ;;
+  *releases/download*) printf 'not-a-zip' > "$out" ;;
+  *) echo "unexpected curl call: $*" >&2; exit 1 ;;
+esac
+`,
+    unzipShim: hostHasUnzip() ? null : pyUnzipShim,
+  });
+  try {
+    assert.equal(t.r.status, 0, t.r.stderr);
+    assert.match(t.r.stderr, /gh zip extract failed:/);
+    assert.ok(!existsSync(path.join(cellBin, "gh")), "the redirect-created empty artifact must be removed, not linger");
+  } finally { clean(t); }
 });

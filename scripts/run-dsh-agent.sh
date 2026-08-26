@@ -23,6 +23,11 @@
 #   DSH_SUBAGENT_MODEL    subagent/subagent_fork children's model, "provider/model"
 #                         (unset = inherit the head's route)
 #   DOPPLER_SERVICE_TOKEN required by `doppler run`
+#   DSH_CELL_BIN        persistent prefix for the cell-tool bootstrap
+#                       (default $HOME/.dsh-bot-bin); the relay/reply
+#                       guards in the workflows honor the same seam. gh
+#                       is NOT a hard driver requirement (soft: warn and
+#                       run — the workflows own gh absence); doppler is.
 #
 # Comment-bot reply wiring (used by dsh-agent-comment.yml):
 #   REPLY_TARGET    human label of the thread to answer, e.g. "PR #123"
@@ -220,8 +225,14 @@ install_gh_release() {
   echo "cell-tools: gh missing — installing latest release into $CELL_BIN" >&2
   mkdir -p "$CELL_BIN"
   local errlog; errlog="$(mktemp)"
+  # || true INSIDE the substitution: the driver runs under set -euo
+  # pipefail, and an assignment's status is its substitution's — a failed
+  # resolve (no egress) would abort the whole driver HERE, before the
+  # soft-gh warning / the doppler hard-fail hint ever print (residual on
+  # 3f690a2, verified in the driver's shell context). The empty-string
+  # fallthrough below is the intended degradation.
   GH_VER="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest 2>"$errlog" \
-    | sed -n 's#.*/tag/v\([0-9][0-9.]*\)$#\1#p')"
+    | sed -n 's#.*/tag/v\([0-9][0-9.]*\)$#\1#p' || true)"
   [ -n "$GH_VER" ] || { echo "cell-tools: could not resolve latest gh release:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; return 0; }
   case "$1" in
     linux)
@@ -235,9 +246,12 @@ install_gh_release() {
       local z; z="$(mktemp)"
       curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_macOS_${flavor}.zip" -o "$z" 2>"$errlog" \
         || { echo "cell-tools: gh zip fetch failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; rm -f "$z"; return 0; }
-      # macOS ships unzip; the archive root is gh_<ver>_<flavor>/bin/gh
+      # macOS ships unzip; the archive root is gh_<ver>_<flavor>/bin/gh.
+      # rm the target on failure too: the redirect creates it even when
+      # unzip fails — an empty artifact must not linger in the persistent
+      # prefix.
       unzip -p "$z" '*/bin/gh' > "$CELL_BIN/gh" 2>"$errlog" \
-        || { echo "cell-tools: gh zip extract failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; rm -f "$z"; return 0; }
+        || { echo "cell-tools: gh zip extract failed:" >&2; sed 's/^/  /' "$errlog" | tail -3 >&2; rm -f "$z" "$CELL_BIN/gh"; return 0; }
       rm -f "$z"
       ;;
   esac
