@@ -385,11 +385,30 @@ fi
 # are restated from the headless profile defaults alongside agentOptions.
 # The model id must exist in the settings catalog — an unknown id fails loud
 # at the first child spawn (UNKNOWN_MODEL), same as a bogus DSH_MODEL.
+# Validation is charset+shape, NOT mere slash-presence: the halves are
+# stamped into STRUCTURED YAML below, so a newline in the value injects
+# sibling agentOptions keys, a `#` comments the rest of a line away, a `:`
+# reinterprets a scalar, a space splits a key — all of those pass a
+# slash-only check. A glob case class cannot express "only these chars"
+# (its trailing `*` is an UNBOUNDED star, not a class quantifier), so the
+# charset check deletes the allowed set and requires an empty residue;
+# anchored shape cases then pin exactly-one-slash + alnum starts.
 SUBAGENT_PATCH_FILE=""
 if [ -n "${DSH_SUBAGENT_MODEL:-}" ]; then
   case "$DSH_SUBAGENT_MODEL" in
     */*) ;;
     *) echo "error: DSH_SUBAGENT_MODEL must be provider/model (got '$DSH_SUBAGENT_MODEL')" >&2; exit 2;;
+  esac
+  SUBAGENT_RESIDUE="${DSH_SUBAGENT_MODEL//[A-Za-z0-9._-]/}"
+  SUBAGENT_RESIDUE="${SUBAGENT_RESIDUE//\//}"
+  if [ -n "$SUBAGENT_RESIDUE" ]; then
+    echo "error: DSH_SUBAGENT_MODEL may contain only [A-Za-z0-9._-/] — the value is stamped into structured YAML, metacharacters are rejected (got '$DSH_SUBAGENT_MODEL')" >&2
+    exit 2
+  fi
+  case "$DSH_SUBAGENT_MODEL" in
+    /*|*/|*/*/*|*/[!A-Za-z0-9]*|[!A-Za-z0-9]*)
+      echo "error: DSH_SUBAGENT_MODEL must be provider/model — exactly one '/', both halves non-empty and starting [A-Za-z0-9] (got '$DSH_SUBAGENT_MODEL')" >&2
+      exit 2;;
   esac
   SUB_PROVIDER="${DSH_SUBAGENT_MODEL%/*}"
   SUB_MODEL_ID="${DSH_SUBAGENT_MODEL#*/}"

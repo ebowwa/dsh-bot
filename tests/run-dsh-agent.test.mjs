@@ -454,3 +454,148 @@ test("the stamped overlay composes onto the real headless profile (skip when dsh
     rmSync(isoHome, { recursive: true, force: true });
   }
 });
+
+// --- 8. DSH_SUBAGENT_MODEL validation is charset+shape, not slash-presence -
+//
+// The halves are interpolated into STRUCTURED YAML (the stamped overlay), so
+// values that carry YAML metacharacters are injection vectors, not typos to
+// be discovered at child spawn: a newline injects sibling agentOptions keys
+// (`zai/glm-5.2\n    maxDepth: 99` stamps a maxDepth row — verified against
+// the pre-fix launcher), a `#` comments the rest of a line away, a `:`
+// reinterprets a scalar, a space splits a key. All of those PASS a
+// slash-only check, which is why the script validates by deletion-residue
+// (delete [A-Za-z0-9._-/], require empty) plus anchored shape cases. The
+// literal glob-class alternative (`[A-Za-z0-9._-]*/…`) is itself leaky: in
+// glob semantics the trailing `*` is an unbounded star, not a class
+// quantifier, so `zai/glm:5.2` and the newline value still match it.
+test("DSH_SUBAGENT_MODEL rejects YAML metacharacters and malformed shapes before anything is stamped", () => {
+  const bad = [
+    "zai/",                          // empty model half (shape)
+    "/glm-5.2",                      // empty provider half (shape)
+    "zai/glm-5.2\n    maxDepth: 99", // YAML sibling-key injection via newline (charset)
+    "#zai/glm-5.2",                  // comment-shaped value (charset)
+    "zai/glm:5.2",                   // mapping colon (charset)
+    "zai/glm 5.2",                   // space (charset)
+    "a/b/c",                         // two slashes (shape)
+    ".zai/glm-5.2",                  // non-alnum provider start (shape)
+  ];
+  for (const value of bad) {
+    const { proc, home, args } = runLauncher({ DSH_SUBAGENT_MODEL: value });
+    assert.equal(proc.status, 2, `value ${JSON.stringify(value)} must be rejected with exit 2, stderr: ${proc.stderr}`);
+    assert.match(
+      proc.stderr,
+      /error: DSH_SUBAGENT_MODEL/,
+      `value ${JSON.stringify(value)} must fail with the typed error`,
+    );
+    assert.equal(args, "", `value ${JSON.stringify(value)} must never launch dsh`);
+    assert.ok(
+      !existsSync(path.join(home, "subagent-model.patch.yml")),
+      `value ${JSON.stringify(value)} must not stamp an overlay`,
+    );
+  }
+  // The shapes that MUST pass (the fleet's real values) — accepted, stamped.
+  for (const good of ["zai/glm-5.2", "zai/glm-5-turbo", "opencode-go2/deepseek-v4-flash", "a/b"]) {
+    const { proc, home } = runLauncher({ DSH_SUBAGENT_MODEL: good });
+    assert.equal(proc.status, 0, `value ${JSON.stringify(good)} must be accepted, stderr: ${proc.stderr}`);
+    assert.ok(
+      existsSync(path.join(home, "subagent-model.patch.yml")),
+      `value ${JSON.stringify(good)} must stamp its overlay`,
+    );
+  }
+});
+
+// --- 9. the stamped overlay BOOTS: the plugin tree loads (real dsh) -------
+//
+// --dump-config (test 4's composition check) validates NOTHING: it exits 0
+// over a patch whose plugin tree cannot load — the review-run-32897389988
+// defect class in the #24 lineage, where an agentOptions-only stamp was
+// green to the dump while every real boot died with "plugin tree failed to
+// load … $.provider missing required value". The only hermetic proof that
+// the launcher's stamp is bootable is booting it: `dsh --profile headless
+// --patch <overlay>` zod-validates every plugin config BEFORE any
+// credential lookup, so with no API key in env it dies fast at credential
+// resolution — and reaching that step IS the pass condition. Skipped when
+// the dsh CLI is absent (lanes without it keep the stub-level coverage).
+test("the stamped overlay boots: the real plugin tree loads against it (skip when dsh is absent)", { skip: spawnSync("dsh", ["--version"]).status !== 0 }, () => {
+  const { home } = runLauncher({ DSH_SUBAGENT_MODEL: "zai/glm-5.2" });
+  const overlay = path.join(home, "subagent-model.patch.yml");
+  assert.ok(existsSync(overlay), "overlay stamped by the launcher run");
+  assert.ok(existsSync(path.join(home, "settings.yaml")), "settings stamped by the same launcher run");
+
+  const cwd = mkdtempSync(path.join(tmpdir(), "dsh-submodel-bootcwd-"));
+  // Strip every plausible inference credential: the boot must die at
+  // credential resolution (fast, offline), never place a live call.
+  const env = { ...process.env, DSH_HOME: home };
+  for (const k of ["ZAI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN"]) delete env[k];
+  try {
+    const boot = spawnSync("dsh", ["--profile", "headless", "--patch", overlay, "reply ok"], {
+      encoding: "utf8",
+      timeout: 120_000,
+      cwd,
+      env,
+    });
+    assert.notEqual(boot.status, null, "the boot probe must terminate, not hang");
+    const combined = `${boot.stdout}\n${boot.stderr}`;
+    assert.doesNotMatch(
+      combined,
+      /plugin tree failed to load/,
+      "the profile must LOAD against the stamped overlay — this signature is the dump-green/boot-dead defect class",
+    );
+    assert.doesNotMatch(
+      combined,
+      /\$\.provider missing required value/,
+      "dsh-tool-subagent's zod schema must be satisfied: the restated base keys survived the patch",
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// --- 10. the HEAD stays on the settings model (real dsh boot) -------------
+//
+// The other half of the change's contract: the override routes ONLY the
+// subagent/subagent_fork children — the head agent must ride the SETTINGS
+// model (agent-default-model zai/glm-5.3 from the launcher's own
+// settings.yaml stamp), never the override. Boot is the observable: with
+// settings naming zai and the children overridden to a DIFFERENT provider
+// (opencode-go2), credential resolution must name the SETTINGS route
+// ("zai") — if the patch had leaked into the head's model, the error would
+// name opencode-go2 instead. This is also the runtime proof that
+// settings.yaml applies to the booted tree (a --dump-config cannot show
+// it: it prints layer views without resolving them). Skipped when the dsh
+// CLI is absent.
+test("the head stays on the settings model: boot resolves the SETTINGS provider route, not the override (skip when dsh is absent)", { skip: spawnSync("dsh", ["--version"]).status !== 0 }, () => {
+  // Children overridden to a provider DIFFERENT from settings' zai so the
+  // two halves are distinguishable in the credential-resolution error.
+  const { home } = runLauncher({ DSH_SUBAGENT_MODEL: "opencode-go2/deepseek-v4-flash" });
+  const overlay = path.join(home, "subagent-model.patch.yml");
+  assert.ok(existsSync(overlay), "overlay stamped by the launcher run");
+
+  const cwd = mkdtempSync(path.join(tmpdir(), "dsh-submodel-maincwd-"));
+  const env = { ...process.env, DSH_HOME: home };
+  for (const k of ["ZAI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN"]) delete env[k];
+  try {
+    const boot = spawnSync("dsh", ["--profile", "headless", "--patch", overlay, "reply ok"], {
+      encoding: "utf8",
+      timeout: 120_000,
+      cwd,
+      env,
+    });
+    assert.notEqual(boot.status, null, "the boot probe must terminate, not hang");
+    const combined = `${boot.stdout}\n${boot.stderr}`;
+    assert.match(combined, /MISSING_CREDENTIAL/, "the boot must reach credential resolution — proving settings.yaml applies at runtime");
+    assert.match(
+      combined,
+      /provider route "zai"/,
+      "the HEAD resolves its model from settings.yaml (zai/glm-5.3) — the run model, not the override",
+    );
+    assert.doesNotMatch(
+      combined,
+      /provider route "opencode-go2"/,
+      "the subagent override must not become the head's route — that would be this half broken",
+    );
+    assert.doesNotMatch(combined, /plugin tree failed to load/, "the patched plugin tree must still load");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
