@@ -210,6 +210,10 @@ ensure_cell_tools() {
   # finding 4).
   if [ -n "$CELL_ADDED_PREFIXES" ] && [ -n "${GITHUB_PATH:-}" ]; then
     for p in $CELL_ADDED_PREFIXES; do echo "$p" >> "$GITHUB_PATH"; done
+    # and the resolved prefix itself, job-ambient: the workflow guards'
+    # ${DSH_CELL_BIN:-...} probe only sees it if this step publishes it
+    # (review approve-round finding 3).
+    [ -n "${GITHUB_ENV:-}" ] && printf 'DSH_CELL_BIN=%s\n' "$CELL_BIN" >> "$GITHUB_ENV"
   fi
   # doppler is a HARD requirement (the driver launches the agent through
   # `doppler run`); gh is not (the driver's own gh uses are guarded — the

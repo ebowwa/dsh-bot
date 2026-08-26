@@ -169,7 +169,7 @@ jobs:
           # CELL_PROBE_DIRS exactly (doppler prefix + linuxbrew included)
           # and honors its DSH_CELL_BIN seam.
           command -v gh >/dev/null 2>&1 \
-            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
+            || export PATH="${DSH_CELL_BIN:-${HOME:-/root}/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
           command -v gh >/dev/null 2>&1 || {
             echo "::warning::gh unavailable on this cell — review summary NOT relayed to the thread; see the run log"
             exit 0

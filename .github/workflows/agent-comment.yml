@@ -185,6 +185,15 @@ jobs:
         run: |
           set -uo pipefail
           cd "$GITHUB_WORKSPACE"
+          # gh may sit outside the runner service PATH on self-hosted cells
+          # (secondsee lane-lottery, 2026-08-26): same probe as the reply
+          # step below — without it every gh use in THIS step (ack edit,
+          # pre-flight, pr create, review dispatch) can 127 on a gh-less
+          # cell. The list mirrors the driver's CELL_PROBE_DIRS exactly
+          # (doppler prefix + linuxbrew included) and honors its
+          # DSH_CELL_BIN seam (review r2 finding 5, shipper half).
+          command -v gh >/dev/null 2>&1 \
+            || export PATH="${DSH_CELL_BIN:-${HOME:-/root}/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
           # progress edit: agent phase over, shipping
           if [ -n "${ACK_COMMENT_ID:-}" ]; then
             gh api "repos/${GITHUB_REPOSITORY}/issues/comments/${ACK_COMMENT_ID}" -X PATCH               -f body="**dsh agent (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${DSH_RUNNER_NAME:-unknown}
@@ -194,15 +203,6 @@ jobs:
               _(this comment will be edited with the result)_" >/dev/null 2>&1 || true
           fi
           NOTE=""
-          # gh may sit outside the runner service PATH on self-hosted cells
-          # (secondsee lane-lottery, 2026-08-26): same probe as the reply
-          # step below — without it every gh use in THIS step (ack edit,
-          # pre-flight, pr create, review dispatch) can 127 on a gh-less
-          # cell. The list mirrors the driver's CELL_PROBE_DIRS exactly
-          # (doppler prefix + linuxbrew included) and honors its
-          # DSH_CELL_BIN seam (review r2 finding 5, shipper half).
-          command -v gh >/dev/null 2>&1 \
-            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
           # open_pr <head-branch> <title> <gh-pr-create args...>: create the
           # PR and dispatch its review with the same degrade-or-loud
           # treatment as the relay/reply guards — gh missing on the cell is
@@ -317,7 +317,7 @@ jobs:
           # driver's CELL_PROBE_DIRS exactly (doppler prefix + linuxbrew
           # included) and honors its DSH_CELL_BIN seam.
           command -v gh >/dev/null 2>&1 \
-            || export PATH="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
+            || export PATH="${DSH_CELL_BIN:-${HOME:-/root}/.dsh-bot-bin}:/opt/homebrew/bin:/usr/local/bin:$HOME/.doppler/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
           command -v gh >/dev/null 2>&1 || {
             echo "::warning::gh unavailable on this cell — reply NOT posted to the thread; the agent's answer is in the run log"
             exit 0
