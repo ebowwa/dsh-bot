@@ -20,10 +20,16 @@
 //     (`process.env.PATH` / `$PATH` / `${PATH}`) is an error: on the
 //     dsh lanes the real CLIs (doppler, gh) are installed in system
 //     dirs, so such a PATH constructs nothing. Absence of a
-//     lane-installed CLI must be built with an explicit BIN seam
-//     (e.g. DOPPLER_BIN=/nonexistent/...), as resolve-push-token.sh
-//     gained in 7dd6d21; presence is constructed soundly by PREPENDING
-//     a shim dir to the ambient PATH, which shadows everywhere.
+//     lane-installed CLI is built soundly either with an explicit BIN
+//     seam (e.g. DOPPLER_BIN=/nonexistent/...) or with a fully hermetic
+//     PATH whose only entries are prepared shim dirs, runtime-
+//     interpolated, with no system dir traversed and the ambient PATH
+//     not re-included — nothing outside the prepared dirs can be found,
+//     which is how tests/resolve-push-token.test.mjs constructs it
+//     (blessed review r2 finding 5; the DOPPLER_BIN seam that repo
+//     gained in 7dd6d21 is gone). Presence is constructed soundly by
+//     PREPENDING a shim dir to the ambient PATH, which shadows
+//     everywhere.
 //
 // Scope note: only PATH-assignment lines are examined, and comment
 // lines (//, *, #) are skipped — the corpus scan in
@@ -76,7 +82,7 @@ export const lintTests = (text, name) => {
     if (!literals.length) continue;
     errors.push({
       line: i + 1,
-      message: `${name}:${i + 1}: PATH hard-codes ${literals.map((l) => `'${l}'`).join(", ")} without re-including the ambient PATH — the dsh lanes install the real CLIs (doppler, gh) in system dirs, so this restriction constructs no absence and a test riding it passes on a dev machine but takes the wrong branch on a lane (gates run 32933615526). Prepend to the ambient PATH (…:\${process.env.PATH}) or construct absence with an explicit BIN seam (e.g. DOPPLER_BIN=/nonexistent/…).`,
+      message: `${name}:${i + 1}: PATH hard-codes ${literals.map((l) => `'${l}'`).join(", ")} without re-including the ambient PATH — the dsh lanes install the real CLIs (doppler, gh) in system dirs, so this restriction constructs no absence and a test riding it passes on a dev machine but takes the wrong branch on a lane (gates run 32933615526). Prepend to the ambient PATH (…:\${process.env.PATH}) or construct absence with an explicit BIN seam (e.g. DOPPLER_BIN=/nonexistent/…) or a hermetic PATH of prepared dirs only (no system dir, ambient not re-included).`,
     });
   }
   return errors;

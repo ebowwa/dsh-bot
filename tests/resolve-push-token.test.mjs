@@ -18,6 +18,14 @@
 // that the credential never rides a child command line (finding 5), and
 // a base64 shim that wraps at 76 columns on every lane so the
 // wrap-strip is pinned for real (finding 6).
+//
+// Review round 2 (request-changes) widened the argv pin and added three
+// pins: the argv log now covers curl too — round 1's pin watched only
+// git while the scope probe passed `-H "Authorization: token …"` on
+// curl's command line (r2 finding 1) — plus a self-sealing-append pin
+// for a .git/config with no trailing newline (r2 finding 2), a pin that
+// a non-numeric DOPPLER_FETCH_TIMEOUT_S cannot kill the watchdog
+// (r2 finding 3), and a two-run idempotency pin (r2 finding 4).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -197,15 +205,32 @@ test("credential never appears on any child argv (ps-safe on shared runners)", w
   // concurrent job under the same runner service account. GIT_BIN points
   // at a shim that logs every git argv then execs the real git: if the
   // value ever rides an argument again, the log catches it.
+  //
+  // Review round-2 finding 1 widened the pin: curl is shimmed to log its
+  // argv too. Round 1's scope probe passed `-H "Authorization: token …"`
+  // on curl's command line — the exact exposure the test name denies —
+  // while this pin observed only GIT_BIN calls and stayed green. Now the
+  // header travels in a 0600 mktemp curl --config file, and any leak
+  // through git OR curl argv trips the assertions below.
   const logDir = mkdtempSync(path.join(tmpdir(), "resolve-push-argv-"));
-  const logFile = path.join(logDir, "argv.log");
+  const gitLog = path.join(logDir, "git-argv.log");
+  const curlLog = path.join(logDir, "curl-argv.log");
   const shims = shimPath();
   const gitShim = `#!/bin/sh
-printf '%s\\n' "\$*" >> ${JSON.stringify(logFile)}
+printf '%s\\n' "\$*" >> ${JSON.stringify(gitLog)}
 exec ${resolveBin("git")} "\$@"
 `;
   writeFileSync(path.join(shims.dir, "git"), gitShim);
   chmodSync(path.join(shims.dir, "git"), 0o755);
+  // Logs argv, then answers like the base curl shim. It must NOT exec
+  // the real curl — this suite is offline by contract.
+  const curlShim = `#!/bin/sh
+printf '%s\\n' "\$*" >> ${JSON.stringify(curlLog)}
+if [ "\${CURL_RC:-0}" != "0" ]; then exit "\${CURL_RC}"; fi
+printf 'HTTP/1.1 200 OK\\r\\nX-OAuth-Scopes: %s\\r\\n\\r\\n' "\${CURL_SCOPES-}"
+`;
+  writeFileSync(path.join(shims.dir, "curl"), curlShim);
+  chmodSync(path.join(shims.dir, "curl"), 0o755);
   const env = {
     ...process.env,
     PATH: shims.path,
@@ -216,17 +241,90 @@ exec ${resolveBin("git")} "\$@"
     CURL_SCOPES: "repo, workflow",
   };
   const r = spawnSync(BASH, [SCRIPT], { cwd: repo, env, encoding: "utf8" });
+  const redact = (line) => line.replace(/doppler-pat/g, "<tok>").replace(/basic \S.*/, "basic <redacted>");
   try {
     assert.equal(r.status, 0, r.stderr);
     assert.equal(headerIn(repo), headerFor("doppler-pat"));
-    const argvLog = readFileSync(logFile, "utf8");
-    assert.match(argvLog, /rev-parse --git-dir/, "git must run through the shim — otherwise this pin is vacuous");
-    for (const line of argvLog.split("\n")) {
-      assert.ok(!/AUTHORIZATION|basic /.test(line), `credential leaked to child argv: ${line.replace(/basic .*/, "basic <redacted>")}`);
+    const argvByTool = [
+      ["git", readFileSync(gitLog, "utf8")],
+      ["curl", readFileSync(curlLog, "utf8")],
+    ];
+    assert.match(argvByTool[0][1], /rev-parse --git-dir/, "git must run through the shim — otherwise this pin is vacuous");
+    assert.match(argvByTool[1][1], /--config/, "curl must run through the shim and take its header by --config — otherwise this pin is vacuous");
+    for (const [tool, log] of argvByTool) {
+      for (const line of log.split("\n")) {
+        assert.ok(!/authorization/i.test(line), `${tool} argv leaked the probe header: ${redact(line)}`);
+        assert.ok(!line.includes("doppler-pat"), `${tool} argv leaked the token value: ${redact(line)}`);
+        assert.ok(!/basic /.test(line), `${tool} argv leaked the header value: ${redact(line)}`);
+      }
     }
   } finally {
     rmSync(shims.dir, { recursive: true, force: true });
     rmSync(logDir, { recursive: true, force: true });
+  }
+}));
+
+test("append self-seals a .git/config whose last line lacks a trailing newline", withCase((repo) => {
+  // Review r2 finding 2: when the key is absent, --unset-all is a no-op
+  // and does not normalize the file — a non-git writer can leave the
+  // final line unterminated, and a bare append then fuses the [http …]
+  // section header onto it, after which git refuses the config. The
+  // write_header printf starts with a blank line so the stanza always
+  // begins on a fresh line; a stray blank line in a git config is
+  // harmless.
+  const cfgPath = path.join(repo, ".git", "config");
+  writeFileSync(cfgPath, readFileSync(cfgPath, "utf8").replace(/\n$/, ""));
+  const { r, cleanup } = runResolver(repo, { DOPPLER_SERVICE_TOKEN: "" });
+  try {
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /no doppler cli\/service token/);
+    assert.equal(headerIn(repo), headerFor("fallback-tok"));
+  } finally { cleanup(); }
+}));
+
+test("non-numeric DOPPLER_FETCH_TIMEOUT_S still bounds the fetch (watchdog survives a bad env)", withCase((repo) => {
+  // Review r2 finding 3: a bad timeout must not kill the watchdog and
+  // resurrect the unbounded fetch. Precision on the mechanism: the
+  // set-but-EMPTY case is already absorbed by `${VAR:-20}` (the colon
+  // form covers null too) — the value that genuinely slips through is a
+  // NON-NUMERIC one: `sleep "abc"` fails instantly, the watchdog
+  // subshell dies silently, and a hung fetch is unbounded again. So the
+  // pin rides "abc" — the case `:-` alone lets through — and asserts
+  // the guard's 20s default still fires: the doppler shim sleeps 25s,
+  // comfortably past 20, so the ONLY bounded outcome is the watchdog
+  // kill + typed fallback.
+  const t0 = Date.now();
+  const { r, cleanup } = runResolver(repo, {
+    DOPPLER_HANG_S: "25", DOPPLER_FETCH_TIMEOUT_S: "abc",
+    DOPPLER_OUT: "doppler-pat", CURL_SCOPES: "repo, workflow",
+  });
+  try {
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(Date.now() - t0 < 30_000, `resolver ran ${Date.now() - t0}ms — the fetch was not bounded`);
+    assert.match(r.stdout, /doppler fetch failed/);
+    assert.equal(headerIn(repo), headerFor("fallback-tok"));
+  } finally { cleanup(); }
+}));
+
+test("resolver is idempotent: a second run replaces the stanza, never stacks it", withCase((repo) => {
+  // Review r2 finding 4: the idempotency claim (--unset-all first, one
+  // stanza) was unpinned — a coverage gap, not a bug. Two runs, the
+  // second resolving a DIFFERENT credential, must leave exactly one
+  // value: the latest. --get-all (not --get) so a stacked duplicate
+  // cannot hide behind first-match semantics.
+  const runs = [
+    runResolver(repo, { DOPPLER_OUT: "doppler-pat", CURL_SCOPES: "repo, workflow" }),
+    runResolver(repo, { DOPPLER_SERVICE_TOKEN: "" }),
+  ];
+  try {
+    assert.equal(runs[0].r.status, 0, runs[0].r.stderr);
+    assert.equal(runs[1].r.status, 0, runs[1].r.stderr);
+    const all = spawnSync("git", ["config", "--local", "--get-all", "http.https://github.com/.extraheader"],
+      { cwd: repo, encoding: "utf8" });
+    assert.equal(all.status, 0, all.stderr);
+    assert.deepEqual(all.stdout.trim().split("\n"), [headerFor("fallback-tok")]);
+  } finally {
+    for (const run of runs) run.cleanup();
   }
 }));
 

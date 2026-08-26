@@ -29,14 +29,18 @@
 #
 # Env names deliberately avoid the KEY/PASSWORD/SECRET/TOKEN patterns
 # (dsh scrubs those from agent child processes) even though this step's
-# env never reaches the agent. The token VALUE is never printed, logged,
-# or written anywhere except the local git config — the same place the
-# checkout puts the ephemeral one today — and it never rides argv: it
-# reaches the config file via a bash-builtin printf redirect, so no
-# spawned process ever lists it on its command line (argv is ps/
-# /proc/<pid>/cmdline readable by any concurrent job under the same
-# runner service account; actions/checkout keeps its credential out of
-# argv for the same reason). Decision lines are the log.
+# env never reaches the agent. The token VALUE is never printed or
+# logged, and its only resting places are the local git config — the
+# same place the checkout puts the ephemeral one today — and 0600 mktemp
+# transients (the doppler fetch output, the scope probe's curl config
+# file), each read once and removed. It never rides argv: the config
+# stanza is appended by a bash-builtin printf redirect, and the probe's
+# Authorization header travels inside that curl config file, never in a
+# -H argument — so no spawned process ever lists the value on its
+# command line (argv is ps//proc/<pid>/cmdline readable by any
+# concurrent job under the same runner service account;
+# actions/checkout keeps its credential out of argv for the same
+# reason). Decision lines are the log.
 #
 # Local/dev or test invocation: PATH-shim `doppler`/`curl` (see
 # tests/resolve-push-token.test.mjs — including a fully hermetic PATH
@@ -59,6 +63,13 @@ GIT_BIN="${GIT_BIN:-git}"
 # API held the job until the workflow-level timeout). GNU `timeout` is
 # absent on the mac cells, so the bound is a background fetch + watchdog.
 FETCH_TIMEOUT_S="${DOPPLER_FETCH_TIMEOUT_S:-20}"
+# Validate AFTER the default (review r2 finding 3): `:-` absorbs an
+# unset-or-empty value, but a NON-NUMERIC one
+# (`DOPPLER_FETCH_TIMEOUT_S=abc`) passes straight through — `sleep "abc"`
+# fails instantly, the watchdog subshell dies silently, and the fetch is
+# unbounded again, the exact regression this bound exists to close. Any
+# unusable value (empty, non-numeric) falls back to the 20s default.
+case "$FETCH_TIMEOUT_S" in ''|*[!0-9]*) FETCH_TIMEOUT_S=20;; esac
 
 write_header() { # $1 = token value; base64 may wrap (BSD, 76 cols) — strip newlines
   # Idempotency first: drop any prior stanza. argv carries only the KEY;
@@ -70,7 +81,13 @@ write_header() { # $1 = token value; base64 may wrap (BSD, 76 cols) — strip ne
   # argument of a spawned process), so the credential stays off argv.
   # base64 (+, /, =) and the AUTHORIZATION prefix contain no quote or
   # backslash characters, so the double-quoted git-config value is exact.
-  printf '[http "https://github.com/"]\n\textraheader = "%s"\n' \
+  # The format starts with a blank line (review r2 finding 2): when the
+  # key is absent, --unset-all above is a no-op and does NOT normalize
+  # the file, so a .git/config whose last line lacks a newline would
+  # fuse the [http …] section header onto it and stop parsing — the
+  # leading \n makes the append self-sealing (a stray blank line in a
+  # git config is harmless).
+  printf '\n[http "https://github.com/"]\n\textraheader = "%s"\n' \
     "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$1" | base64 | tr -d '\n')" \
     >> "$("$GIT_BIN" rev-parse --git-dir)/config"
 }
@@ -117,10 +134,26 @@ if [ -z "$TOK" ]; then
 fi
 
 # Bounded probe (--max-time 15): a hung api.github.com must not hold the
-# job; a failed probe falls back like every doppler-side failure.
-SCOPES="$(curl -sI --max-time 15 -H "Authorization: token $TOK" https://api.github.com/user \
-  | tr -d '\r' | awk -F': ' 'tolower($1)=="x-oauth-scopes" {print $2}')" \
-  || { echo "push-token: workflow secret fallback (scope probe failed — no answer from api.github.com)"; write_header "$FALLBACK"; exit 0; }
+# job; a failed probe falls back like every doppler-side failure. The
+# Authorization header rides a 0600 mktemp curl --config file, never a
+# -H argument — argv is ps//proc/<pid>/cmdline readable by concurrent
+# jobs under the same runner service account, exactly the exposure the
+# credential write avoids (review r2 finding 1: the round-2 probe passed
+# `-H "Authorization: token …"` on curl's command line). printf is a
+# builtin and the value is a %s argument, so it never rides argv here
+# either; a token containing config-breaking characters (quote,
+# backslash) makes curl fail to parse the file and takes the typed
+# fallback below — fail-closed. Removed on both branches, the same
+# discipline as OUT_FILE.
+HDR_FILE="$(mktemp "${TMPDIR:-/tmp}/resolve-push-token.XXXXXX")"
+printf 'header = "Authorization: token %s"\n' "$TOK" >"$HDR_FILE"
+if ! SCOPES="$(curl -sI --max-time 15 --config "$HDR_FILE" https://api.github.com/user \
+    | tr -d '\r' | awk -F': ' 'tolower($1)=="x-oauth-scopes" {print $2}')"; then
+  rm -f "$HDR_FILE"
+  echo "push-token: workflow secret fallback (scope probe failed — no answer from api.github.com)"
+  write_header "$FALLBACK"; exit 0
+fi
+rm -f "$HDR_FILE"
 if [ -z "$SCOPES" ]; then
   echo "push-token: workflow secret fallback (scope probe returned nothing — token invalid?)"
   write_header "$FALLBACK"; exit 0
