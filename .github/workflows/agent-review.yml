@@ -160,6 +160,18 @@ jobs:
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail
+          # gh may sit outside the runner service PATH on self-hosted cells
+          # (secondsee lane-lottery, 2026-08-26): probe the driver's
+          # persistent prefix + brew prefixes before giving up. A missing gh
+          # here degrades to a warning — the verdict itself is in the run
+          # log (tee'd by the review step), and this step's failure would
+          # only bury it under a bare 127.
+          command -v gh >/dev/null 2>&1 \
+            || export PATH="$HOME/.dsh-bot-bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v gh >/dev/null 2>&1 || {
+            echo "::warning::gh unavailable on this cell — review summary NOT relayed to the thread; see the run log"
+            exit 0
+          }
           {
             echo "**dsh review (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${RUNNER_NAME:-unknown}"
             echo

@@ -119,6 +119,108 @@ fi
 # patterns; supplied by the consumer's (private) workflow config.
 export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
 
+# --- 0. cell tooling: probe prefixes, then bootstrap missing tools --------
+# Lane-lottery defect (secondsee 2026-08-26, runs 32944063408 / 32941451004):
+# widening runner-labels to ["self-hosted"] lets reviews land on ANY cell in
+# a fleet, and two of three secondsee cells had no gh/doppler on the runner
+# SERVICE PATH (mac launchd safe-path class: tools exist under a brew prefix
+# the service never sees, or were never installed) — the review died at the
+# first `doppler run` with a bare "command not found" (line 227 of v1.27.0).
+# node stays a hard requirement (this driver itself runs on it); doppler and
+# gh are ensured here, cheapest first:
+#   1. probe known prefixes onto PATH (fixes the regressed-PATH case with
+#      zero network),
+#   2. install into a PERSISTENT user prefix (~/.dsh-bot-bin — survives
+#      steps and runs, so the first hardened run pays the cost and later
+#      runs just find the binaries),
+#   3. fail LOUD with the provisioning hint — never limp on half a
+#      toolchain (a missing doppler at `doppler run` means no ZAI_API_KEY
+#      and a dead agent; a missing gh means no identity, no verdict).
+CELL_BIN="${DSH_CELL_BIN:-$HOME/.dsh-bot-bin}"
+# Probe order: the persistent cell prefix, the brew prefixes a mac/linux
+# runner service PATH may have regressed away from, and doppler's own
+# default. CELL_PROBE_DIRS is a TEST SEAM (space list) — callers never set
+# it; the offline suite needs to rule out the dev machine's real prefixes.
+CELL_PROBE_DIRS="${CELL_PROBE_DIRS:-$CELL_BIN /opt/homebrew/bin /usr/local/bin $HOME/.doppler/bin /home/linuxbrew/.linuxbrew/bin}"
+CELL_ADDED_PREFIXES=""
+cell_probe_prefixes() {
+  local p
+  for p in $CELL_PROBE_DIRS; do
+    [ -d "$p" ] || continue
+    case ":$PATH:" in *":$p:"*) ;; *)
+      PATH="$p:$PATH"
+      CELL_ADDED_PREFIXES="${CELL_ADDED_PREFIXES:+$CELL_ADDED_PREFIXES }$p"
+      ;;
+    esac
+  done
+  export PATH
+  # Publish additions to later steps in the SAME job (shipper, relay,
+  # reply): GITHUB_PATH is the sanctioned per-line mechanism. The shell
+  # export dies with this step; workflow steps after us must also find
+  # gh/doppler (a missing gh at the relay was the second 127 in the
+  # secondsee failures).
+  if [ -n "$CELL_ADDED_PREFIXES" ] && [ -n "${GITHUB_PATH:-}" ]; then
+    for p in $CELL_ADDED_PREFIXES; do echo "$p" >> "$GITHUB_PATH"; done
+  fi
+}
+ensure_cell_tools() {
+  # *_BIN are TEST SEAMS only — callers never set them. Explicit paths let
+  # the offline suite construct a tool's absence; the dsh lanes install
+  # real CLIs in system dirs, so PATH restriction alone cannot (the
+  # resolve-push-token suite earned this rule the hard way, gates run
+  # 32933615526).
+  local node_bin="${NODE_BIN:-node}" doppler_bin="${DOPPLER_BIN:-doppler}" gh_bin="${GH_BIN:-gh}"
+  command -v "$node_bin" >/dev/null 2>&1 \
+    || { echo "error: node missing on this cell — the driver itself needs it; provision the runner" >&2; return 1; }
+  cell_probe_prefixes
+  if ! command -v "$doppler_bin" >/dev/null 2>&1; then
+    echo "cell-tools: doppler missing — installing (official install.sh --install-path $CELL_BIN)" >&2
+    mkdir -p "$CELL_BIN"
+    # install.sh honors --install-path and upgrades an existing binary in
+    # place; verified against the script source (arg parse, Feb 2026).
+    curl -fsSL https://cli.doppler.com/install.sh | sh -s -- --install-path "$CELL_BIN" >/dev/null 2>&1 \
+      || echo "cell-tools: doppler install.sh failed (no egress to cli.doppler.com?)" >&2
+    cell_probe_prefixes
+  fi
+  if ! command -v "$gh_bin" >/dev/null 2>&1; then
+    echo "cell-tools: gh missing — installing latest release into $CELL_BIN" >&2
+    mkdir -p "$CELL_BIN"
+    GH_OS="$(uname -s)"; GH_ARCH="$(uname -m)"
+    case "$GH_OS:$GH_ARCH" in
+      Darwin:arm64) GHsuffix="macOS_arm64" ;;
+      Darwin:*) GHsuffix="macOS_amd64" ;;
+      Linux:aarch64|Linux:arm64) GHsuffix="linux_arm64" ;;
+      Linux:*) GHsuffix="linux_amd64" ;;
+      *) echo "cell-tools: unsupported cell OS/arch ($GH_OS/$GH_ARCH) for gh install" >&2 ;;
+    esac
+    if [ -n "${GHsuffix:-}" ]; then
+      GH_VER="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/cli/cli/releases/latest 2>/dev/null | sed -n 's#.*/tag/v\([0-9][0-9.]*\)$#\1#p')"
+      if [ -n "$GH_VER" ]; then
+        curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VER}/gh_${GH_VER}_${GHsuffix}.tar.gz" \
+          | tar -xz -C "$CELL_BIN" --strip-components=1 "gh_${GH_VER}_${GHsuffix}/bin/gh" 2>/dev/null \
+          || echo "cell-tools: gh tarball fetch failed" >&2
+      else
+        echo "cell-tools: could not resolve latest gh release (no egress to github.com?)" >&2
+      fi
+      chmod +x "$CELL_BIN/gh" 2>/dev/null || true
+      cell_probe_prefixes
+    fi
+  fi
+  local missing=""
+  command -v "$doppler_bin" >/dev/null 2>&1 || missing="doppler"
+  command -v "$gh_bin" >/dev/null 2>&1 || missing="${missing:+$missing }gh"
+  if [ -n "$missing" ]; then
+    echo "error: cell tooling still missing after bootstrap: $missing" >&2
+    echo "hint: provision the runner service PATH (gh, doppler) or install" >&2
+    echo "      manually: brew install gh doppler  — the driver bootstraps to" >&2
+    echo "      $CELL_BIN but needs egress to cli.doppler.com and github.com" >&2
+    return 1
+  fi
+  echo "cell-tools: node/doppler/gh present (PATH ok)" >&2
+}
+ensure_cell_tools
+
+
 # Per-run model: "provider/model" (e.g. zai/glm-5.2). Settings are
 # REGENERATED from the pristine template every run (never regex-patched in
 # place): idempotent, immune to drift, restores the default after overrides.

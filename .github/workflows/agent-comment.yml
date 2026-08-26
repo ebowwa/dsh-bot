@@ -290,6 +290,18 @@ jobs:
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail
+          # gh may sit outside the runner service PATH on self-hosted cells
+          # (secondsee lane-lottery, 2026-08-26): probe the driver's
+          # persistent prefix + brew prefixes before giving up. The reply is
+          # the user-facing output channel, so a missing gh downgrades to a
+          # warning pointing at the run log (the answer is tee'd there by
+          # the agent step) instead of a bare 127.
+          command -v gh >/dev/null 2>&1 \
+            || export PATH="$HOME/.dsh-bot-bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+          command -v gh >/dev/null 2>&1 || {
+            echo "::warning::gh unavailable on this cell — reply NOT posted to the thread; the agent's answer is in the run log"
+            exit 0
+          }
           {
             echo "**dsh agent (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${DSH_RUNNER_NAME:-unknown}"
             echo
