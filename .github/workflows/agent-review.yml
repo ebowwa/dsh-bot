@@ -53,9 +53,13 @@ jobs:
         env:
           EVENT_PATH: ${{ github.event_path }}
           GH_TOKEN: ${{ github.token }}
+          # Dispatch input reaches bash through env, never raw workflow
+          # interpolation into the run block (review finding 3 — same
+          # hygiene class as the task/comment-text seam).
+          PR_INPUT: ${{ inputs.pr }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            N="${{ inputs.pr }}"
+            N="$PR_INPUT"
           else
             N="$(node -e '
               const e = JSON.parse(require("fs").readFileSync(process.env.EVENT_PATH, "utf8"));
@@ -72,7 +76,20 @@ jobs:
           # Resolve the state here; MERGED/CLOSED PRs skip review and the
           # relay step says why. LOOKUP_FAILED (no gh on this runner, bogus
           # number) proceeds as before — the checkout surfaces that error.
-          STATE="$(gh pr view "$N" --json state --jq .state 2>/dev/null || echo LOOKUP_FAILED)"
+          #
+          # --repo is REQUIRED (review finding 1): this is the job's first
+          # step, no checkout has run, the workspace has no .git, and gh
+          # resolves the repo from the cwd's git remote — it does NOT read
+          # GITHUB_REPOSITORY. Without --repo every clean-workspace dispatch
+          # silently degraded to LOOKUP_FAILED and the skip path was dead
+          # code. gh's stderr is kept and surfaced on the fallback, not
+          # swallowed — a bare redirect here is what hid this failure mode.
+          STATE_ERR="$RUNNER_TEMP/pr-state-stderr.txt"
+          STATE="$(gh pr view "$N" --repo "$GITHUB_REPOSITORY" --json state --jq .state 2>"$STATE_ERR" || true)"
+          if [ -z "$STATE" ]; then
+            STATE="LOOKUP_FAILED"
+            echo "::warning::PR state lookup failed for #$N — proceeding as before. gh stderr: $(tr '\n' ' ' < "$STATE_ERR" 2>/dev/null || echo none)"
+          fi
           echo "state=$STATE" >> "$GITHUB_OUTPUT"
           echo "PR $N state: $STATE"
 
