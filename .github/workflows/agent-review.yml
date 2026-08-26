@@ -52,25 +52,39 @@ jobs:
         id: pr
         env:
           EVENT_PATH: ${{ github.event_path }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "number=${{ inputs.pr }}" >> "$GITHUB_OUTPUT"
+            N="${{ inputs.pr }}"
           else
             N="$(node -e '
               const e = JSON.parse(require("fs").readFileSync(process.env.EVENT_PATH, "utf8"));
               const m = (e.comment?.body ?? "").match(/^\/review[[:space:]]*#?(\d+)/);
               process.stdout.write(m ? m[1] : String(e.issue?.number ?? ""));
             ')"
-            echo "number=$N" >> "$GITHUB_OUTPUT"
           fi
+          echo "number=$N" >> "$GITHUB_OUTPUT"
+          # State pre-flight: the tower can dispatch a review for a PR that
+          # merged moments earlier (dsh-bot #27, run 32936033264) — GitHub
+          # deletes refs/pull/N/merge when a PR merges, so the checkout below
+          # died with "couldn't find remote ref refs/pull/27/merge" (3 git
+          # retries) and the job went red on a race nobody could act on.
+          # Resolve the state here; MERGED/CLOSED PRs skip review and the
+          # relay step says why. LOOKUP_FAILED (no gh on this runner, bogus
+          # number) proceeds as before — the checkout surfaces that error.
+          STATE="$(gh pr view "$N" --json state --jq .state 2>/dev/null || echo LOOKUP_FAILED)"
+          echo "state=$STATE" >> "$GITHUB_OUTPUT"
+          echo "PR $N state: $STATE"
 
       - name: Checkout the PR merge ref
+        if: steps.pr.outputs.state != 'MERGED' && steps.pr.outputs.state != 'CLOSED'
         uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ steps.pr.outputs.number }}/merge
           fetch-depth: 0
 
       - name: Fetch dsh-bot scripts
+        if: steps.pr.outputs.state != 'MERGED' && steps.pr.outputs.state != 'CLOSED'
         uses: actions/checkout@v4
         with:
           repository: ebowwa/dsh-bot
@@ -84,6 +98,7 @@ jobs:
           token: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
 
       - name: Review the PR (rules + gates + verdict)
+        if: steps.pr.outputs.state != 'MERGED' && steps.pr.outputs.state != 'CLOSED'
         env:
           DOPPLER_SERVICE_TOKEN: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
           GH_TOKEN: ${{ github.token }}
@@ -157,13 +172,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ steps.pr.outputs.number }}
+          PR_STATE: ${{ steps.pr.outputs.state }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail
           {
             echo "**dsh review (GLM-5.3)** — run: ${GITHUB_RUN_ID} — lane: ${RUNNER_NAME:-unknown}"
             echo
-            node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$RUNNER_TEMP/dsh-review-output.txt" 2>/dev/null \
-              || echo "_(review output withheld: scrubber unavailable)_"
+            if [ "$PR_STATE" = "MERGED" ] || [ "$PR_STATE" = "CLOSED" ]; then
+              echo "_(skipped — PR is $PR_STATE; the merge ref no longer exists, there is nothing left to review)_"
+            elif [ -f "$RUNNER_TEMP/dsh-review-output.txt" ]; then
+              node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$RUNNER_TEMP/dsh-review-output.txt" 2>/dev/null \
+                || echo "_(review output withheld: scrubber unavailable)_"
+            else
+              echo "_(no review output was produced — see the failed step above)_"
+            fi
           } > "$RUNNER_TEMP/dsh-review-reply.md"
           gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file "$RUNNER_TEMP/dsh-review-reply.md"
