@@ -82,6 +82,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.number && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.event.issue.pull_request && format('refs/pull/{0}/merge', github.event.issue.number) || '' }}
+          # persist-credentials: false — the shipper's `git push` (below)
+          # and the agent's must not ride the ephemeral GITHUB_TOKEN
+          # (github-actions[bot]): it can never push workflow-file edits,
+          # and a bot-actor push onto a workflow-touching PR parks its
+          # runs in action_required (factory #229). The resolve step after
+          # the toolkit fetch writes the real credential.
+          persist-credentials: false
 
       - name: Fetch dsh-bot scripts (pinned ref)
         uses: actions/checkout@v4
@@ -91,6 +98,19 @@ jobs:
           path: .dsh-bot
           token: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
         # The reusable workflow's own repo is not auto-checked-out.
+
+      # Lane impact: none — same runners, one added step (a doppler fetch +
+      # one bounded curl per run, ~2-4s). Must run BEFORE the agent and the
+      # shipper: both push through the workspace git config it writes.
+      - name: Push credential (Doppler-first)
+        # Doppler seed/prd GITHUB_TOKEN when its scopes cover repo+workflow,
+        # else DSH_BOT_REPO_TOKEN (documented PAT with workflow scope), else
+        # github.token (= exactly today's behavior). Decision line in this
+        # step's log; the token only ever reaches the local git config.
+        env:
+          DOPPLER_SERVICE_TOKEN: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
+          PUSH_FALLBACK_CRED: ${{ secrets.DSH_BOT_REPO_TOKEN || github.token }}
+        run: bash "${GITHUB_WORKSPACE}/.dsh-bot/scripts/resolve-push-token.sh"
 
       - name: Run agent, ship, dispatch review
         env:
