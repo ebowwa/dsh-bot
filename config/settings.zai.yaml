@@ -34,6 +34,11 @@ llm-pi-ai:
           name: GLM-5.3 Flash
           contextWindow: 1000000
           maxTokens: 128000
+          # native multimodal — admit image inputs (glm-5.3 stays text-only:
+          # under-claiming refuses at attach time, over-claiming dies mid-run)
+          input:
+            - text
+            - image
         - id: glm-5.2
           name: GLM-5.2
           contextWindow: 1000000
