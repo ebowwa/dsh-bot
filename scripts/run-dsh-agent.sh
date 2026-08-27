@@ -327,7 +327,7 @@ else
 fi
 echo "::endgroup::" >&2
 
-echo "::group::dsh agent (GLM-5.3 via Z.AI)" >&2
+echo "::group::dsh agent (${MODEL_ID} via ${PROVIDER})" >&2
 # --- 2b. gh identity for the agent ------------------------------------------
 # dsh scrubs KEY/PASSWORD/SECRET/TOKEN env vars from agent child processes
 # (dsh-subprocess SENSITIVE_ENV_PATTERN) — so GH_TOKEN never reaches the
