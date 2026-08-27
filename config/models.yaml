@@ -10,6 +10,12 @@ models:
     context: 1000000
     maxTokens: 131072
     tier: flagship
+  # A/B lane twin of the flagship — same coding-plan pricing, faster.
+  # Verified against the live /models API 2026-08-27 (catalog + probe).
+  - id: zai/glm-5.3-flash
+    context: 1000000
+    maxTokens: 128000
+    tier: flagship
   # near-flagship — cheaper worker for routine tasks
   - id: zai/glm-5.2
     context: 1000000
@@ -47,8 +53,8 @@ models:
 
 # Role defaults (consumer shells may override per-call):
 #   worker  (agent-comment/agent-dispatch): zai/glm-5.3
-#   reviewer (agent-review):                zai/glm-5.3
+#   reviewer (agent-review):                zai/glm-5.3-flash
 #   cheap worker for mechanical tasks:      zai/glm-5.2 or glm-5-turbo
 role-defaults:
   worker: zai/glm-5.3
-  reviewer: zai/glm-5.3
+  reviewer: zai/glm-5.3-flash
