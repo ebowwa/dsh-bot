@@ -28,6 +28,12 @@ llm-pi-ai:
           name: GLM-5.3
           contextWindow: 1000000
           maxTokens: 131072
+        # A/B lane twin of the flagship: same coding-plan pricing, faster.
+        # Present so per-run overrides (DSH_MODEL=zai/glm-5.3-flash) resolve.
+        - id: glm-5.3-flash
+          name: GLM-5.3 Flash
+          contextWindow: 1000000
+          maxTokens: 128000
         - id: glm-5.2
           name: GLM-5.2
           contextWindow: 1000000
