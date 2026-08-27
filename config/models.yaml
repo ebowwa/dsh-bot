@@ -12,6 +12,7 @@ models:
     tier: flagship
   # A/B lane twin of the flagship — same coding-plan pricing, faster.
   # Verified against the live /models API 2026-08-27 (catalog + probe).
+  # First native-multimodal GLM-5 model: image_url inputs, text/image.
   - id: zai/glm-5.3-flash
     context: 1000000
     maxTokens: 128000
