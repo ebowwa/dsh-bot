@@ -22,6 +22,15 @@
 #   DSH_MODEL             head model, "provider/model" (default zai/glm-5.3)
 #   DSH_SUBAGENT_MODEL    subagent/subagent_fork children's model, "provider/model"
 #                         (unset = inherit the head's route)
+#   DSH_WEB_SEARCH_CELLS  comma-separated runner names where the local
+#                         web-search-browser provider is mounted (per-cell
+#                         adoption; unset/empty = off everywhere). Requires the
+#                         cell's plugin copy (DSH_WEB_SEARCH_BROWSER_PATH,
+#                         default $HOME/.dsh/profiles/node_modules/@local/
+#                         dsh-web-search-browser) and fails loud without it.
+#   DSH_WEB_SEARCH_BROWSER_BROWSERS   optional space-separated browser binary
+#                         paths pinned into the provider row (chrome-headless-
+#                         shell cells where full-browser new-headless hangs)
 #   DOPPLER_SERVICE_TOKEN required by `doppler run`
 #   DSH_CELL_BIN        persistent prefix for the cell-tool bootstrap
 #                       (default $HOME/.dsh-bot-bin); the relay/reply
@@ -437,11 +446,116 @@ if [ -n "${DSH_SUBAGENT_MODEL:-}" ]; then
   } > "$SUBAGENT_PATCH_FILE"
   echo "subagent model: $SUB_PROVIDER/$SUB_MODEL_ID (subagent + subagent_fork; head stays $PROVIDER/$MODEL_ID)" >&2
 fi
+# --- 2e. local web search + fetch provider (per-cell, default-off) ---------
+# DSH_WEB_SEARCH_CELLS mounts the local key-free ctx.web provider
+# (@local/dsh-web-search-browser, issue #293) — but ONLY on cells the caller
+# listed, and only when this job's runner is one of them: the adoption gates
+# (packaging resolves, dsh version parity, a live smoke on that exact cell)
+# are per-cell facts, so enablement is per-cell too. Default (unset/empty)
+# is off on every cell — no silent fleet-wide flip.
+# When the runner name matches, this block:
+#   1. copies the CELL's canonical plugin copy into THIS job's profile module
+#      fallback ($DSH_HOME/profiles/node_modules/@local/). A job-scoped home
+#      is minted fresh per run, so the upstream deploy path (a copy in the
+#      profile tree, peers resolving through the flat fallback) is
+#      re-performed on every launch; a missing or incomplete copy fails loud
+#      — a plugin that cannot resolve its deps is a dead mount, and a dead
+#      mount must never look like a working one;
+#   2. stamps a REGENERATED --patch overlay (same idempotence rule as the
+#      settings and subagent-model stamps): the `web` row restated with
+#      searchProvider: headless-browser and the `tool-web` row restated with
+#      fetch: true (patch rows REPLACE whole plugin config, so both must be
+#      restatements, not additions), then the provider row itself. The
+#      provider row rides an explicit `insert:` list — a bare row whose id
+#      does not exist in the tree only warns ("entry not found") and is
+#      skipped, which is a silently-dead patch, the exact failure the insert
+#      grammar exists to prevent;
+#   3. optionally pins browser binaries (DSH_WEB_SEARCH_BROWSER_BROWSERS,
+#      space-separated paths): some CI cells have no working new-headless
+#      Chrome/Brave session (the render hangs producing no DOM) while the
+#      standalone chrome-headless-shell binary works — the provider's
+#      `browsers` config is the supported seam for that. The values are
+#      stamped into structured YAML, so the charset is validated and
+#      metacharacters fail loud.
+# The plugin source default is the deployment-canonical location; override
+# with DSH_WEB_SEARCH_BROWSER_PATH.
+WEB_PATCH_FILE=""
+if [ -n "${DSH_WEB_SEARCH_CELLS:-}" ] && [ -n "${RUNNER_NAME:-}" ]; then
+  # Comma-separated entries, each matched as a GLOB against the runner name:
+  # exact names ("mini-dsh-2") and machine-level prefixes ("mini-dsh*", which
+  # covers the standing services AND the elastic pool spawned on the same
+  # hardware) both work; an entry only ever WIDENS what mounts, so matching
+  # stays an affirmative listed-cell gate, never a substring accident.
+  for web_cell in ${DSH_WEB_SEARCH_CELLS//,/ }; do
+    [ -n "$web_cell" ] || continue
+    case "$RUNNER_NAME" in
+      $web_cell)
+        WEB_CELL_MATCH=1
+        break
+        ;;
+    esac
+  done
+  if [ "${WEB_CELL_MATCH:-}" = "1" ]; then
+      WEB_PLUGIN_SRC="${DSH_WEB_SEARCH_BROWSER_PATH:-$HOME/.dsh/profiles/node_modules/@local/dsh-web-search-browser}"
+      if [ ! -f "$WEB_PLUGIN_SRC/package.json" ] || [ ! -f "$WEB_PLUGIN_SRC/lib/index.js" ]; then
+        echo "error: web-search-browser is listed for runner '$RUNNER_NAME' (DSH_WEB_SEARCH_CELLS) but the per-cell plugin copy is missing or incomplete at $WEB_PLUGIN_SRC" >&2
+        echo "hint: provision the cell first — copy the package (HelloMacOScreator web-search-browser/, v0.3.2+) into the profile module tree and pass its live smoke (one search + one fetch) before listing this runner name" >&2
+        exit 2
+      fi
+      mkdir -p "$DSH_HOME/profiles/node_modules/@local"
+      rm -rf "$DSH_HOME/profiles/node_modules/@local/dsh-web-search-browser"
+      cp -R "$WEB_PLUGIN_SRC" "$DSH_HOME/profiles/node_modules/@local/dsh-web-search-browser"
+      WEB_BROWSERS_BLOCK=""
+      if [ -n "${DSH_WEB_SEARCH_BROWSER_BROWSERS:-}" ]; then
+        WEB_BROWSERS_BLOCK="        browsers:"
+        for web_browser in ${DSH_WEB_SEARCH_BROWSER_BROWSERS}; do
+          case "$web_browser" in
+            *[!A-Za-z0-9._/@+-]*)
+              echo "error: DSH_WEB_SEARCH_BROWSER_BROWSERS entries must be plain paths of [A-Za-z0-9._/@+-] (got '$web_browser') — the value is stamped into structured YAML" >&2
+              exit 2;;
+          esac
+          WEB_BROWSERS_BLOCK="$WEB_BROWSERS_BLOCK
+          - $web_browser"
+        done
+      fi
+      WEB_PATCH_FILE="$DSH_HOME/web-search-browser.patch.yml"
+      {
+        echo "# Stamped by run-dsh-agent.sh (DSH_WEB_SEARCH_CELLS lists runner '${RUNNER_NAME}'; regenerated every run)."
+        echo "# Local key-free ctx.web provider (issue #293): the web and tool-web rows are whole-config"
+        echo "# restatements (searchProvider pin; fetch switch + budgets); the provider row is an explicit"
+        echo "# insert list, because a bare row with an unknown id only warns and is silently skipped."
+        echo "- id: web"
+        echo "  name: '@deepseek-ai/dsh-web'"
+        echo "  config:"
+        echo "    searchProvider: headless-browser"
+        echo "- id: tool-web"
+        echo "  name: '@deepseek-ai/dsh-tool-web'"
+        echo "  config:"
+        echo "    fetch: true"
+        echo "    searchTimeoutMs: 60000"
+        echo "    fetchTimeoutMs: 60000"
+        echo "- insert:"
+        echo "    - id: web-search-browser"
+        echo "      name: '@local/dsh-web-search-browser'"
+        echo "      config:"
+        echo "        engines: [duckduckgo, bing, mojeek]"
+        echo "        timeoutMs: 30000"
+        echo "        fetchMaxChars: 100000"
+        if [ -n "$WEB_BROWSERS_BLOCK" ]; then
+          printf '%s\n' "$WEB_BROWSERS_BLOCK"
+        fi
+      } > "$WEB_PATCH_FILE"
+      echo "web-search-browser: mounted for this run (searchProvider: headless-browser; tool-web fetch: true; plugin copied from $WEB_PLUGIN_SRC)" >&2
+  fi
+fi
 # Array + ${arr[@]+...} guard: set -u with an empty array is an error on
 # bash 3.2 (the mac cells' /bin/bash) — the guard expands to nothing instead.
 DSH_LAUNCH_ARGS=()
 if [ -n "$SUBAGENT_PATCH_FILE" ]; then
   DSH_LAUNCH_ARGS+=(--patch "$SUBAGENT_PATCH_FILE")
+fi
+if [ -n "$WEB_PATCH_FILE" ]; then
+  DSH_LAUNCH_ARGS+=(--patch "$WEB_PATCH_FILE")
 fi
 
 # --- 3. Doppler-injected run, with live progress ---------------------------

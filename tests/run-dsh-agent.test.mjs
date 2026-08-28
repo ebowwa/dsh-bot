@@ -599,3 +599,115 @@ test("the head stays on the settings model: boot resolves the SETTINGS provider 
     rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+// --- 8-13. DSH_WEB_SEARCH_CELLS: mount the local key-free ctx.web provider
+// (@local/dsh-web-search-browser, factory issue #293) on listed cells only.
+// Contract: unset/empty = off EVERYWHERE (default-off rollout); a listed
+// RUNNER_NAME gets (a) the cell's plugin copy re-performed into this job's
+// profile module fallback and (b) a regenerated --patch overlay whose web/
+// tool-web rows are whole-config RESTATEMENTS and whose provider row rides
+// an explicit `insert:` list — a bare row with an unknown id only warns and
+// is silently skipped by the loader's patch applier (the dead-patch trap).
+// An unlisted runner gets a byte-identical launch line. A listed runner
+// without a complete cell copy must FAIL LOUD, not dead-mount.
+
+// A minimal but complete plugin copy (what a gate-provisioned cell holds:
+// manifest + the entry module the loader imports).
+const makePluginCopy = (dir) => {
+  const src = path.join(dir, "cell-plugin", "dsh-web-search-browser");
+  mkdirSync(path.join(src, "lib"), { recursive: true });
+  writeFileSync(path.join(src, "package.json"), JSON.stringify({ name: "@local/dsh-web-search-browser", version: "0.3.2", type: "module", main: "lib/index.js" }));
+  writeFileSync(path.join(src, "lib", "index.js"), "export const name = 'web-search-browser';\n");
+  return src;
+};
+
+const WEB_BASE = (pluginSrc) => ({
+  DSH_WEB_SEARCH_CELLS: "mini-dsh,mini-dsh-2",
+  RUNNER_NAME: "mini-dsh-2",
+  DSH_WEB_SEARCH_BROWSER_PATH: pluginSrc,
+});
+
+test("DSH_WEB_SEARCH_CELLS mounts the provider on a listed runner: plugin copied, overlay stamped, second --patch passed", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-web-mount-"));
+  const { proc, home, args } = runLauncher(WEB_BASE(makePluginCopy(dir)));
+  assert.equal(proc.status, 0, `launcher must succeed, stderr: ${proc.stderr}`);
+  assert.match(proc.stderr, /web-search-browser: mounted for this run/);
+  // (a) the plugin copy rides THIS job's profile module fallback
+  const copied = path.join(home, "profiles", "node_modules", "@local", "dsh-web-search-browser");
+  assert.ok(existsSync(path.join(copied, "package.json")) && existsSync(path.join(copied, "lib", "index.js")),
+    "the plugin must be copied into $DSH_HOME/profiles/node_modules/@local/");
+  // (b) the overlay: restated rows + insert-listed provider row
+  const overlay = path.join(home, "web-search-browser.patch.yml");
+  assert.ok(existsSync(overlay), "web overlay stamped");
+  const overlayText = readFileSync(overlay, "utf8");
+  assert.match(overlayText, /- id: web\n  name: '@deepseek-ai\/dsh-web'\n  config:\n    searchProvider: headless-browser\n/);
+  assert.match(overlayText, /- id: tool-web\n  name: '@deepseek-ai\/dsh-tool-web'\n  config:\n    fetch: true\n    searchTimeoutMs: 60000\n    fetchTimeoutMs: 60000\n/);
+  assert.match(overlayText, /- insert:\n    - id: web-search-browser\n      name: '@local\/dsh-web-search-browser'\n/,
+    "the provider row must ride an explicit insert list — a bare unknown-id row is silently skipped by the loader");
+  assert.match(args, /web-search-browser\.patch\.yml/, "dsh must receive the web overlay path");
+  // (c) both overlays ride the launch line when both features are active
+  const withBoth = runLauncher({ ...WEB_BASE(makePluginCopy(dir)), DSH_SUBAGENT_MODEL: "zai/glm-5-turbo" });
+  const bothArgs = readFileSync(path.join(withBoth.dir, "dsh-args.txt"), "utf8");
+  assert.match(bothArgs, /subagent-model\.patch\.yml/);
+  assert.match(bothArgs, /web-search-browser\.patch\.yml/);
+  assert.equal(bothArgs.indexOf("subagent-model.patch.yml") < bothArgs.indexOf("web-search-browser.patch.yml"), true,
+    "the subagent overlay precedes the web overlay (deterministic argv order)");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("DSH_WEB_SEARCH_CELLS without this runner's name stays off: no overlay, no copy, byte-identical default", () => {
+  const { proc, home, args } = runLauncher({ DSH_WEB_SEARCH_CELLS: "some-other-cell", RUNNER_NAME: "mini-dsh-2" });
+  assert.equal(proc.status, 0, `launcher must succeed, stderr: ${proc.stderr}`);
+  assert.doesNotMatch(proc.stderr, /web-search-browser: mounted/);
+  assert.ok(!existsSync(path.join(home, "web-search-browser.patch.yml")), "no web overlay stamped");
+  assert.ok(!existsSync(path.join(home, "profiles", "node_modules", "@local")), "no plugin copy performed");
+  assert.ok(!args.includes("--patch"), "launch line stays byte-identical");
+  // glob matching is anchored at an entry level: an entry that merely CONTAINS
+  // the runner name must not enable it
+  const prefix = runLauncher({ DSH_WEB_SEARCH_CELLS: "mini-dsh-2.backup", RUNNER_NAME: "mini-dsh-2" });
+  assert.ok(!existsSync(path.join(prefix.home, "web-search-browser.patch.yml")), "an entry containing the name is not a match");
+  // an entry can be a machine-level GLOB covering the elastic pool spawned on the same hardware
+  const gdir = mkdtempSync(path.join(tmpdir(), "dsh-web-glob-"));
+  const globbed = runLauncher({ ...WEB_BASE(makePluginCopy(gdir)).DSH_WEB_SEARCH_CELLS ? {} : {}, DSH_WEB_SEARCH_CELLS: "mini-dsh*", RUNNER_NAME: "mini-dsh-e13", DSH_WEB_SEARCH_BROWSER_PATH: makePluginCopy(gdir) });
+  assert.ok(existsSync(path.join(globbed.home, "web-search-browser.patch.yml")), "a listed glob enables the elastic instance on that machine");
+  const globMiss = runLauncher({ DSH_WEB_SEARCH_CELLS: "seed-*", RUNNER_NAME: "mini-dsh-e13" });
+  assert.ok(!existsSync(path.join(globMiss.home, "web-search-browser.patch.yml")), "a non-matching glob stays off");
+  // an unknown RUNNER_NAME (empty) must never enable
+  const unnamed = runLauncher({ DSH_WEB_SEARCH_CELLS: "mini-dsh," });
+  assert.ok(!existsSync(path.join(unnamed.home, "web-search-browser.patch.yml")), "no runner name = never enables");
+});
+
+test("a listed runner without a complete cell copy fails loud with the provisioning hint (no dead mounts)", () => {
+  const { proc, home } = runLauncher({ DSH_WEB_SEARCH_CELLS: "mini-dsh-2", RUNNER_NAME: "mini-dsh-2" });
+  assert.notEqual(proc.status, 0, "the launcher must fail loud, not dead-mount");
+  assert.match(proc.stderr, /per-cell plugin copy is missing or incomplete/);
+  assert.match(proc.stderr, /live smoke/, "the hint names the gate the cell must pass");
+  assert.ok(!existsSync(path.join(home, "web-search-browser.patch.yml")), "no overlay stamped on failure");
+});
+
+test("DSH_WEB_SEARCH_BROWSER_PATH relocates the canonical copy the mount is performed from", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-web-path-"));
+  const { home } = runLauncher({ ...WEB_BASE(makePluginCopy(dir)), });
+  assert.ok(existsSync(path.join(home, "profiles", "node_modules", "@local", "dsh-web-search-browser", "package.json")),
+    "the relocation seam is honored");
+  const gone = runLauncher({ ...WEB_BASE(path.join(dir, "missing")) });
+  assert.notEqual(gone.proc.status, 0, "a missing relocated copy fails loud");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("DSH_WEB_SEARCH_BROWSER_BROWSERS pins the browser list into the overlay; metacharacters fail loud", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-web-pin-"));
+  const base = WEB_BASE(makePluginCopy(dir));
+  const good = runLauncher({ ...base, DSH_WEB_SEARCH_BROWSER_BROWSERS: "/usr/local/bin/chrome-headless-shell" });
+  assert.equal(good.proc.status, 0, `pinned run must succeed, stderr: ${good.proc.stderr}`);
+  const overlayText = readFileSync(path.join(good.home, "web-search-browser.patch.yml"), "utf8");
+  assert.match(overlayText, /browsers:\n          - \/usr\/local\/bin\/chrome-headless-shell\n/,
+    "the pin lands as a YAML list under the provider config");
+  const plain = runLauncher(base);
+  assert.ok(!readFileSync(path.join(plain.home, "web-search-browser.patch.yml"), "utf8").includes("browsers:"),
+    "no browsers key without the pin (the provider auto-detects)");
+  const evil = runLauncher({ ...base, DSH_WEB_SEARCH_BROWSER_BROWSERS: "/tmp/ok' - id: x" });
+  assert.notEqual(evil.proc.status, 0, "YAML metacharacters in the pin must fail loud");
+  assert.match(evil.proc.stderr, /plain paths of \[A-Za-z0-9\._\/@\+-\]/);
+  rmSync(dir, { recursive: true, force: true });
+});

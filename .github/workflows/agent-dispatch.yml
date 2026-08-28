@@ -25,6 +25,10 @@ on:
         description: "Model for the subagent/subagent_fork children: provider/model (e.g. zai/glm-5-turbo). Empty = inherit the head's model"
         type: string
         default: ""
+      web-search-browser-cells:
+        description: "Comma-separated runner names where the local web-search-browser provider is mounted. Per-cell and default-off: list a runner ONLY after its cell passed the adoption gates (resolvable plugin copy, dsh version parity, live search+fetch smoke)"
+        type: string
+        default: ""
       timeout-minutes:
         type: number
         default: 120
@@ -91,6 +95,7 @@ jobs:
           DSH_KEEP_SESSIONS: "1" # flight recorder: keep the session transcript for the artifact upload # env, never raw ${{ }} into bash (injection seam)
           DSH_MODEL: ${{ inputs.model }}
           DSH_SUBAGENT_MODEL: ${{ inputs.subagent-model }}
+          DSH_WEB_SEARCH_CELLS: ${{ inputs.web-search-browser-cells }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail
