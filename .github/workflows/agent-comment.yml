@@ -51,6 +51,10 @@ on:
         description: "Comma-separated hostnames to redact on output surfaces (runner fleet names — this file is public, hosts are consumer-private)"
         type: string
         default: ""
+      web-search-browser-cells:
+        description: "Comma-separated runner names where the local web-search-browser provider is mounted. Per-cell and default-off: list a runner ONLY after its cell passed the adoption gates (resolvable plugin copy, dsh version parity, live search+fetch smoke)"
+        type: string
+        default: ""
 
 jobs:
   dsh-agent-comment:
@@ -124,6 +128,7 @@ jobs:
           EXTRA_SCRUB_HOSTS: ${{ inputs.extra-scrub-hosts }}
           DSH_MODEL: ${{ inputs.model }}
           DSH_SUBAGENT_MODEL: ${{ inputs.subagent-model }}
+          DSH_WEB_SEARCH_CELLS: ${{ inputs.web-search-browser-cells }}
           DSH_BOT_DIR: ${{ github.workspace }}/.dsh-bot
         run: |
           set -euo pipefail
