@@ -27,7 +27,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, chmodSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -612,12 +612,19 @@ test("the head stays on the settings model: boot resolves the SETTINGS provider 
 // without a complete cell copy must FAIL LOUD, not dead-mount.
 
 // A minimal but complete plugin copy (what a gate-provisioned cell holds:
-// manifest + the entry module the loader imports).
+// manifest + the entry module the loader imports). The module must be a
+// VALID cordis plugin — a function or an object with an `apply` method —
+// because the live boot test loads it with real dsh; a bare export object
+// fails the real loader ("invalid plugin") while every string assertion
+// still passes, which is the stub-proof/live-truth gap.
 const makePluginCopy = (dir) => {
   const src = path.join(dir, "cell-plugin", "dsh-web-search-browser");
   mkdirSync(path.join(src, "lib"), { recursive: true });
   writeFileSync(path.join(src, "package.json"), JSON.stringify({ name: "@local/dsh-web-search-browser", version: "0.3.2", type: "module", main: "lib/index.js" }));
-  writeFileSync(path.join(src, "lib", "index.js"), "export const name = 'web-search-browser';\n");
+  writeFileSync(
+    path.join(src, "lib", "index.js"),
+    "export const name = 'web-search-browser';\nexport function apply() {}\nexport default { name, apply };\n",
+  );
   return src;
 };
 
@@ -668,8 +675,9 @@ test("DSH_WEB_SEARCH_CELLS without this runner's name stays off: no overlay, no 
   assert.ok(!existsSync(path.join(prefix.home, "web-search-browser.patch.yml")), "an entry containing the name is not a match");
   // an entry can be a machine-level GLOB covering the elastic pool spawned on the same hardware
   const gdir = mkdtempSync(path.join(tmpdir(), "dsh-web-glob-"));
-  const globbed = runLauncher({ ...WEB_BASE(makePluginCopy(gdir)).DSH_WEB_SEARCH_CELLS ? {} : {}, DSH_WEB_SEARCH_CELLS: "mini-dsh*", RUNNER_NAME: "mini-dsh-e13", DSH_WEB_SEARCH_BROWSER_PATH: makePluginCopy(gdir) });
+  const globbed = runLauncher({ DSH_WEB_SEARCH_CELLS: "mini-dsh*", RUNNER_NAME: "mini-dsh-e13", DSH_WEB_SEARCH_BROWSER_PATH: makePluginCopy(gdir) });
   assert.ok(existsSync(path.join(globbed.home, "web-search-browser.patch.yml")), "a listed glob enables the elastic instance on that machine");
+  rmSync(gdir, { recursive: true, force: true });
   const globMiss = runLauncher({ DSH_WEB_SEARCH_CELLS: "seed-*", RUNNER_NAME: "mini-dsh-e13" });
   assert.ok(!existsSync(path.join(globMiss.home, "web-search-browser.patch.yml")), "a non-matching glob stays off");
   // an unknown RUNNER_NAME (empty) must never enable
@@ -685,6 +693,40 @@ test("a listed runner without a complete cell copy fails loud with the provision
   assert.ok(!existsSync(path.join(home, "web-search-browser.patch.yml")), "no overlay stamped on failure");
 });
 
+test("persistent-home mode never bricks the cell: source IS the canonical copy, the mount leaves it intact (review r1 finding 1)", () => {
+  // Provision $HOME/.dsh — the DEFAULT source root — with a complete copy,
+  // then run the mount with NO DSH_WEB_SEARCH_BROWSER_PATH. Under
+  // DSH_PERSISTENT_HOME=1 the home is $HOME/.dsh, so source and destination
+  // are the same tree. Without the same-tree guard the mount's rm -rf
+  // deletes the provisioned copy before cp reads it: run 1 exits 1 with a
+  // bare `cp: cannot stat`, and every later run on that cell dies on
+  // "per-cell plugin copy is missing or incomplete" until re-provisioned.
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-web-persist-"));
+  const home = path.join(dir, ".dsh");
+  const canonical = path.join(home, "profiles", "node_modules", "@local", "dsh-web-search-browser");
+  mkdirSync(path.join(canonical, "lib"), { recursive: true });
+  writeFileSync(path.join(canonical, "package.json"), JSON.stringify({ name: "@local/dsh-web-search-browser", version: "0.3.2", type: "module", main: "lib/index.js" }));
+  writeFileSync(path.join(canonical, "lib", "index.js"), "export const name = 'web-search-browser';\n");
+  const { proc } = runLauncher({
+    DSH_WEB_SEARCH_CELLS: "mini-dsh-2",
+    RUNNER_NAME: "mini-dsh-2",
+    DSH_HOME: home,
+    // HOME too: the default SOURCE root is $HOME/.dsh (persistent-home
+    // default), and the harness's HOME must point at the same tree for
+    // source and destination to actually collide.
+    HOME: dir,
+    // no DSH_WEB_SEARCH_BROWSER_PATH: the canonical default source applies
+  });
+  assert.equal(proc.status, 0, `the same-tree mount must succeed, stderr: ${proc.stderr}`);
+  assert.ok(existsSync(path.join(canonical, "package.json")) && existsSync(path.join(canonical, "lib", "index.js")),
+    "the provisioned canonical copy must survive the mount — deleting it bricks the cell");
+  assert.match(proc.stderr, /same-tree guard/, "the skip must be visible, not silent");
+  assert.ok(existsSync(path.join(home, "web-search-browser.patch.yml")), "the overlay still stamps — the mount is the overlay, not the copy");
+  const overlayText = readFileSync(path.join(home, "web-search-browser.patch.yml"), "utf8");
+  assert.match(overlayText, /- id: web\n  name: '@deepseek-ai\/dsh-web'\n  config:\n    searchProvider: headless-browser\n/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("DSH_WEB_SEARCH_BROWSER_PATH relocates the canonical copy the mount is performed from", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "dsh-web-path-"));
   const { home } = runLauncher({ ...WEB_BASE(makePluginCopy(dir)), });
@@ -695,13 +737,20 @@ test("DSH_WEB_SEARCH_BROWSER_PATH relocates the canonical copy the mount is perf
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("DSH_WEB_SEARCH_BROWSER_BROWSERS pins the browser list into the overlay; metacharacters fail loud", () => {
+test("DSH_WEB_SEARCH_BROWSER_BROWSERS pins the browser list into the overlay; metacharacters, spaced pins, and non-executable entries fail loud", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "dsh-web-pin-"));
   const base = WEB_BASE(makePluginCopy(dir));
-  const good = runLauncher({ ...base, DSH_WEB_SEARCH_BROWSER_BROWSERS: "/usr/local/bin/chrome-headless-shell" });
+  // A pinned entry is filesystem-validated (review r1 finding 2): it must
+  // EXIST and be executable, so the green case pins a real stub binary —
+  // not a path that merely happens to be charset-clean.
+  const browserStub = path.join(dir, "bin", "chrome-headless-shell");
+  mkdirSync(path.join(dir, "bin"));
+  writeFileSync(browserStub, "#!/bin/sh\nexit 0\n");
+  chmodSync(browserStub, 0o755);
+  const good = runLauncher({ ...base, DSH_WEB_SEARCH_BROWSER_BROWSERS: browserStub });
   assert.equal(good.proc.status, 0, `pinned run must succeed, stderr: ${good.proc.stderr}`);
   const overlayText = readFileSync(path.join(good.home, "web-search-browser.patch.yml"), "utf8");
-  assert.match(overlayText, /browsers:\n          - \/usr\/local\/bin\/chrome-headless-shell\n/,
+  assert.ok(overlayText.includes(`browsers:\n          - ${browserStub}\n`),
     "the pin lands as a YAML list under the provider config");
   const plain = runLauncher(base);
   assert.ok(!readFileSync(path.join(plain.home, "web-search-browser.patch.yml"), "utf8").includes("browsers:"),
@@ -709,5 +758,58 @@ test("DSH_WEB_SEARCH_BROWSER_BROWSERS pins the browser list into the overlay; me
   const evil = runLauncher({ ...base, DSH_WEB_SEARCH_BROWSER_BROWSERS: "/tmp/ok' - id: x" });
   assert.notEqual(evil.proc.status, 0, "YAML metacharacters in the pin must fail loud");
   assert.match(evil.proc.stderr, /plain paths of \[A-Za-z0-9\._\/@\+-\]/);
+  // A space-containing pin splits at the whitespace separator BEFORE the
+  // charset check sees it, and the split halves pass the charset — the
+  // filesystem check is what catches them (they used to stamp two bogus
+  // list items and exit 0: review r1 finding 2).
+  const spaced = runLauncher({ ...base, DSH_WEB_SEARCH_BROWSER_BROWSERS: `${dir}/My Browser/chrome-headless-shell` });
+  assert.notEqual(spaced.proc.status, 0, "a space-containing pin must fail loud, not stamp its split halves");
+  assert.match(spaced.proc.stderr, /not an existing executable file/);
+  // A charset-clean entry that does not exist fails the same check.
+  const absent = runLauncher({ ...base, DSH_WEB_SEARCH_BROWSER_BROWSERS: "/nonexistent/chrome-headless-shell" });
+  assert.notEqual(absent.proc.status, 0, "a pinned non-existent binary must fail loud");
+  assert.match(absent.proc.stderr, /not an existing executable file/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- the web overlay boots: the insert-listed provider tree loads (real dsh,
+// skip when the CLI is absent). Same pattern as the subagent overlay boots
+// above: compose is not proof — `--dump-config` validates nothing, and the
+// loader silently skips a bare row whose id is unknown (the dead-patch trap
+// the insert grammar exists to prevent). Boot is the only hermetic proof:
+// with no credentials in env the run must die at credential resolution —
+// reaching that step proves the restated web/tool-web rows and the
+// insert-listed @local provider tree all passed the real plugins' validation.
+test("the stamped web overlay boots: the insert-listed provider tree loads (skip when dsh is absent)", { skip: spawnSync("dsh", ["--version"]).status !== 0 }, () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-web-boot-"));
+  const { home } = runLauncher(WEB_BASE(makePluginCopy(dir)));
+  const overlay = path.join(home, "web-search-browser.patch.yml");
+  assert.ok(existsSync(overlay), "web overlay stamped by the launcher run");
+
+  const cwd = mkdtempSync(path.join(tmpdir(), "dsh-web-bootcwd-"));
+  const env = { ...process.env, DSH_HOME: home };
+  for (const k of ["ZAI_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DOPPLER_SERVICE_TOKEN"]) delete env[k];
+  try {
+    const boot = spawnSync("dsh", ["--profile", "headless", "--patch", overlay, "reply ok"], {
+      encoding: "utf8",
+      timeout: 120_000,
+      cwd,
+      env,
+    });
+    assert.notEqual(boot.status, null, "the boot probe must terminate, not hang");
+    const combined = `${boot.stdout}\n${boot.stderr}`;
+    assert.doesNotMatch(
+      combined,
+      /plugin tree failed to load/,
+      "the insert-listed @local provider tree must load — an insert row that fails to resolve is the dead-mount class",
+    );
+    assert.match(
+      combined,
+      /MISSING_CREDENTIAL/,
+      "the boot must reach credential resolution — proving the restated web/tool-web rows and the provider row compose",
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

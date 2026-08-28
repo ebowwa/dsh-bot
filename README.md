@@ -57,10 +57,13 @@ regenerated `--patch` overlay, exactly like the subagent-model stamp:
   machine). A listed runner without its copy fails loud — a plugin that
   cannot resolve is a dead mount, never a working one.
 - `DSH_WEB_SEARCH_BROWSER_BROWSERS` — optional space-separated browser
-  binary paths pinned into the provider row. Some CI cells have no working
-  full-browser new-headless session (the render hangs with no DOM) while
-  the standalone `chrome-headless-shell` binary works; the provider's
-  `browsers` config is the supported seam for that.
+  binary paths pinned into the provider row. Each entry must be a plain
+  `[A-Za-z0-9._/@+-]` path and an existing executable file; either check
+  fails loud (a pin containing a space splits at the separator before the
+  charset test, so the filesystem check is what rejects it). Some CI cells
+  have no working full-browser new-headless session (the render hangs with
+  no DOM) while the standalone `chrome-headless-shell` binary works; the
+  provider's `browsers` config is the supported seam for that.
 
 The overlay restates the bundle's `web` row (`searchProvider:
 headless-browser`) and `tool-web` row (`fetch: true`, 60s budgets) — patch

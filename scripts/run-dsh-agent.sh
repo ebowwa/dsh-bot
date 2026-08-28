@@ -30,7 +30,11 @@
 #                         dsh-web-search-browser) and fails loud without it.
 #   DSH_WEB_SEARCH_BROWSER_BROWSERS   optional space-separated browser binary
 #                         paths pinned into the provider row (chrome-headless-
-#                         shell cells where full-browser new-headless hangs)
+#                         shell cells where full-browser new-headless hangs).
+#                         Each entry must be a plain [A-Za-z0-9._/@+-] path AND
+#                         an existing executable file — both fail loud (a pin
+#                         containing a space splits at the separator before the
+#                         charset test; the filesystem check catches it).
 #   DOPPLER_SERVICE_TOKEN required by `doppler run`
 #   DSH_CELL_BIN        persistent prefix for the cell-tool bootstrap
 #                       (default $HOME/.dsh-bot-bin); the relay/reply
@@ -503,8 +507,26 @@ if [ -n "${DSH_WEB_SEARCH_CELLS:-}" ] && [ -n "${RUNNER_NAME:-}" ]; then
         exit 2
       fi
       mkdir -p "$DSH_HOME/profiles/node_modules/@local"
-      rm -rf "$DSH_HOME/profiles/node_modules/@local/dsh-web-search-browser"
-      cp -R "$WEB_PLUGIN_SRC" "$DSH_HOME/profiles/node_modules/@local/dsh-web-search-browser"
+      WEB_PLUGIN_DST="$DSH_HOME/profiles/node_modules/@local/dsh-web-search-browser"
+      # Same-tree guard: the source DEFAULT is the canonical per-cell location
+      # ($HOME/.dsh/profiles/...), which in persistent-home mode
+      # (DSH_PERSISTENT_HOME=1, or any externally-supplied DSH_HOME equal to
+      # it) IS the destination. An unconditional rm -rf + cp -R there deletes
+      # the provisioned copy before copying from it — run 1 dies with a bare
+      # `cp: cannot stat` and every later run on that cell finds the copy
+      # "missing or incomplete" (review r1 finding 1). Resolve both trees
+      # physically and re-copy only when they differ; when they match, the
+      # copy already sits in the job-visible profile tree and only the
+      # overlay needs stamping.
+      WEB_SRC_REAL="$(cd "$(dirname "$WEB_PLUGIN_SRC")" && pwd -P)/$(basename "$WEB_PLUGIN_SRC")"
+      WEB_DST_REAL="$(cd "$(dirname "$WEB_PLUGIN_DST")" && pwd -P)/$(basename "$WEB_PLUGIN_DST")"
+      if [ "$WEB_SRC_REAL" != "$WEB_DST_REAL" ]; then
+        rm -rf "$WEB_PLUGIN_DST"
+        cp -R "$WEB_PLUGIN_SRC" "$WEB_PLUGIN_DST"
+        WEB_COPY_NOTE="plugin copied from $WEB_PLUGIN_SRC"
+      else
+        WEB_COPY_NOTE="source IS the canonical copy — re-copy skipped (same-tree guard)"
+      fi
       WEB_BROWSERS_BLOCK=""
       if [ -n "${DSH_WEB_SEARCH_BROWSER_BROWSERS:-}" ]; then
         WEB_BROWSERS_BLOCK="        browsers:"
@@ -514,6 +536,16 @@ if [ -n "${DSH_WEB_SEARCH_CELLS:-}" ] && [ -n "${RUNNER_NAME:-}" ]; then
               echo "error: DSH_WEB_SEARCH_BROWSER_BROWSERS entries must be plain paths of [A-Za-z0-9._/@+-] (got '$web_browser') — the value is stamped into structured YAML" >&2
               exit 2;;
           esac
+          # Filesystem check AFTER the split: the whitespace separator cuts a
+          # space-containing pin in half BEFORE the charset test can see it,
+          # and both halves pass the charset — only an existence + exec-bit
+          # check catches the corrupted halves (review r1 finding 2:
+          # '/opt/My Browser/shell' used to stamp two bogus list items and
+          # exit 0, the silently-dead-pin class this feature refuses).
+          if [ ! -x "$web_browser" ]; then
+            echo "error: DSH_WEB_SEARCH_BROWSER_BROWSERS entry '$web_browser' is not an existing executable file — a pin containing a space splits into entries like this one before validation; pin a space-free path (or a symlink without one)" >&2
+            exit 2
+          fi
           WEB_BROWSERS_BLOCK="$WEB_BROWSERS_BLOCK
           - $web_browser"
         done
@@ -545,7 +577,7 @@ if [ -n "${DSH_WEB_SEARCH_CELLS:-}" ] && [ -n "${RUNNER_NAME:-}" ]; then
           printf '%s\n' "$WEB_BROWSERS_BLOCK"
         fi
       } > "$WEB_PATCH_FILE"
-      echo "web-search-browser: mounted for this run (searchProvider: headless-browser; tool-web fetch: true; plugin copied from $WEB_PLUGIN_SRC)" >&2
+      echo "web-search-browser: mounted for this run (searchProvider: headless-browser; tool-web fetch: true; $WEB_COPY_NOTE)" >&2
   fi
 fi
 # Array + ${arr[@]+...} guard: set -u with an empty array is an error on
