@@ -16,14 +16,17 @@ secrets. This repo needs no runners of its own.
 | `.github/workflows/agent-comment.yml` | the comment loop: context fetch → scrub → agent → ship → reply → review dispatch |
 | `.github/workflows/agent-review.yml` | adversarial review stage (rules + gates + verdict + labels) |
 | `.github/workflows/agent-dispatch.yml` | manual/scheduled task entry |
+| `.github/workflows/drift-check.yml` | self-reviewing release agent: reviews its own main-branch diff, tags + releases only on an approved verdict, then notifies `DSH_BOT_CONSUMERS` (repo variable: comma/space-separated `owner/repo` list) via `repository_dispatch` — each consumer opens its own bump PR |
 | `scripts/run-dsh-agent.sh` | driver: dsh install, settings bootstrap, gh/git identity, scrub shims, live trace, Doppler exec; head model via `DSH_MODEL`, subagent/subagent_fork children via `DSH_SUBAGENT_MODEL` (unset = inherit the head); local web search + fetch via `DSH_WEB_SEARCH_CELLS` (per-cell, default off) |
 | `scripts/scrub-output.mjs` | redaction (creds/PII/SSH keys in both directions; IP/host/path/date on outputs) |
 | `scripts/gh-scrub-shim`, `git-scrub-shim` | the scrubber BETWEEN agent and GitHub/git |
 | `scripts/dsh-progress.mjs` | live JSON trace of reasoning/tool events |
 | `scripts/workflow-lint.mjs` | structural workflow-YAML lint (block-indent consistency; gates runs it — run 32705244305 regression) |
 | `scripts/tests-lint.mjs` | structural test-source lint: rejects PATH assignments that hard-code system dirs without the ambient PATH — they cannot construct a lane-installed CLI's absence (run 32933615526 regression; the corpus test rides `node --test`) |
+| `scripts/drift-verdict.mjs` | strict verdict extraction for drift-check (TAG / TAG-WITH-FINDINGS / BLOCK) + review-body surfacing to the run log |
+| `scripts/resolve-push-token.sh` | Doppler-first git push credential for agent jobs (the checkout's ephemeral token cannot push workflows) |
 | `config/settings.zai.yaml` | DSH settings template (zai provider, glm-5.3) |
-| `consumers.txt` | repos receiving drift bump-PRs |
+| `config/models.yaml` | model catalog for consumers — the provider/model ids the `model:` workflow input and `DSH_MODEL` accept |
 
 ## Adopting (consumer repo)
 
