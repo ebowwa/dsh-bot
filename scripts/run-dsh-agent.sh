@@ -591,9 +591,11 @@ if [ -n "$WEB_PATCH_FILE" ]; then
 fi
 
 # --- 3. Doppler-injected run, with live progress ---------------------------
-# `doppler run` derives project + config from the service token and exports
-# every secret in that config as env. dsh-llm-pi-ai resolves apiKeyEnv:
-# ZAI_API_KEY per request from process env — no key file ever touches disk.
+# The launch runs with the service token's OWN project/config binding: the
+# token carries its scope server-side, and the process sees no local doppler
+# state that could override it (isolation below). dsh-llm-pi-ai resolves
+# apiKeyEnv: ZAI_API_KEY per request from process env — no key file ever
+# touches disk.
 #
 # The headless runner is silent until it finishes, so a long task shows a dead
 # log. Sessions are persisted (zstd JSONL) and flushed at every durability
@@ -604,12 +606,34 @@ FINAL_OUT="$(mktemp /tmp/dsh-agent-answer.XXXXXX)"
 MARKER="$(mktemp /tmp/dsh-agent-marker.XXXXXX)"
 touch "$MARKER"
 
+# Scope isolation (mac-mini-ane, 2026-08-28 — ANE review runs 33281316457+,
+# every dispatch red in ~20s with workflow, driver and secret all untouched):
+# `doppler run --token T` does NOT launch in the token's own scope by
+# default — project/config resolution is flags > DOPPLER_PROJECT /
+# DOPPLER_CONFIG env > the scoped entries in $HOME/.doppler/.doppler.yaml >
+# the token's binding. A shared cell whose user ran `doppler setup` (the
+# factory cells scope seed/prd at $HOME) therefore makes every CI launch
+# request THAT project with THIS repo's service token; the API rejects it
+# ("This token does not have access to requested project 'seed'"), doppler
+# falls back to a fallback file that does not exist either, and `doppler
+# run` exits 1 before `dsh` ever starts. CI must not inherit the
+# interactive user's doppler state, so the doppler process gets:
+#   - a pristine HOME (no scope file, no fallback dir — fresh mktemp dir,
+#     cleaned up with the other launch artifacts), and
+#   - DOPPLER_PROJECT / DOPPLER_CONFIG / DOPPLER_ENVIRONMENT cleared,
+# and the CHILD gets the real HOME back (dsh/git/gh state must survive;
+# the child's -u chain already strips the token and ambient DOPPLER_*).
+DOPPLER_ISOLATED_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dsh-doppler-home.XXXXXX")"
+
 # env -u: the Doppler token is consumed by `doppler run` itself before exec;
 # the agent must never see it (an `env` tool call would ship it to the model
 # provider). ZAI_API_KEY must remain — it IS the inference credential.
-doppler run --token "$DOPPLER_SERVICE_TOKEN" -- \
-  env -u DOPPLER_SERVICE_TOKEN -u DOPPLER_CONFIG -u DOPPLER_PROJECT -u DOPPLER_ENVIRONMENT \
-  dsh --profile headless ${DSH_LAUNCH_ARGS[@]+"${DSH_LAUNCH_ARGS[@]}"} "$TASK" >"$FINAL_OUT" &
+env -u DOPPLER_PROJECT -u DOPPLER_CONFIG -u DOPPLER_ENVIRONMENT \
+    HOME="$DOPPLER_ISOLATED_HOME" \
+  doppler run --token "$DOPPLER_SERVICE_TOKEN" -- \
+    env -u DOPPLER_SERVICE_TOKEN -u DOPPLER_CONFIG -u DOPPLER_PROJECT -u DOPPLER_ENVIRONMENT \
+        HOME="${HOME:?}" \
+    dsh --profile headless ${DSH_LAUNCH_ARGS[@]+"${DSH_LAUNCH_ARGS[@]}"} "$TASK" >"$FINAL_OUT" &
 DSH_PID=$!
 
 stream_session_progress() {
@@ -680,6 +704,9 @@ fi
 # stdout carries ONLY the agent's final answer (the comment workflow tees it).
 cat "$FINAL_OUT"
 rm -f "$FINAL_OUT" "$MARKER"
+# the scope-isolation home held only doppler's own scratch state (version
+# check); rm it so no per-run doppler debris accumulates on the cell.
+rm -rf "$DOPPLER_ISOLATED_HOME" 2>/dev/null || true
 
 # Atomic cleanup: a job-scoped home (transcripts, per-run settings, profile
 # symlinks) is deleted whole — nothing from this job survives on the runner

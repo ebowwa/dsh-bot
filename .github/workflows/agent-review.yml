@@ -133,9 +133,18 @@ jobs:
           set -euo pipefail
           MASK_PROBE="DSH-REVIEW-MASK-9c2b"
           echo "::add-mask::${MASK_PROBE}"
+          # Scope-isolated like the driver's launch (run-dsh-agent.sh): a host
+          # $HOME/.doppler/.doppler.yaml scope would override the token's own
+          # project binding and the probe would die on "token does not have
+          # access to requested project …" — the ZAI_API_KEY mask silently
+          # never gets added. Pristine HOME + cleared DOPPLER_* env = the
+          # token's own scope, on any cell.
           command -v doppler >/dev/null 2>&1 \
-            && doppler run --token "$DOPPLER_SERVICE_TOKEN" -- \
-                 sh -c 'printf "::add-mask::%s\n" "$ZAI_API_KEY"' || true
+            && MASK_HOME="$(mktemp -d "${TMPDIR:-/tmp}/dsh-doppler-probe.XXXXXX")" \
+            && env -u DOPPLER_PROJECT -u DOPPLER_CONFIG -u DOPPLER_ENVIRONMENT HOME="$MASK_HOME" \
+                 doppler run --token "$DOPPLER_SERVICE_TOKEN" -- \
+                   sh -c 'printf "::add-mask::%s\n" "$ZAI_API_KEY"' \
+            && rm -rf "$MASK_HOME" || true
 
           cat > "$RUNNER_TEMP/review-task.txt" <<'TASKEOF' 
           You are the REVIEW stage of this repo's agent loop. Your job is to
