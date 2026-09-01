@@ -36,6 +36,11 @@
 #                       push-credential resolver.
 #   DSH_WORKER_DATA_ROOT    run artifacts root (default $HOME/.dsh-worker)
 #   DSH_WORKER_MODEL        agent model (default zai/glm-5.3)
+#   DSH_WORKER_MODEL_MAP    per-repo model overrides, space-separated
+#                       "owner/repo=provider/model" entries — a repo listed
+#                       here runs its agents/reviews on that model (restores
+#                       consumer-forced lanes like the tower's flash A/B,
+#                       which per-consumer workflow inputs used to carry)
 #   DSH_WORKER_SUBAGENT_MODEL subagent children (default inherit head)
 #   DSH_WORKER_REVIEW_MODEL reviewer model (default $DSH_WORKER_MODEL)
 #   DSH_WORKER_REVIEW_RULES_FILE repo-relative rules (default REVIEW.md)
@@ -86,6 +91,17 @@ RUN_LABEL="${DSH_WORKER_RUN_LABEL:-dsh/running}"
 REVIEW_LABEL="${DSH_WORKER_REVIEW_LABEL:-dsh/review}"
 ACK_MARKER="${DSH_WORKER_ACK_MARKER:-dsh:ack}"
 MODEL="${DSH_WORKER_MODEL:-zai/glm-5.3}"
+# model_for <owner/repo> — per-repo override when mapped, else the fleet
+# default (charset-validated the same way DSH_MODEL is in the driver).
+model_for() {
+  local entry
+  for entry in ${DSH_WORKER_MODEL_MAP:-}; do
+    case "$entry" in
+      "$1="*) printf '%s' "${entry#*=}"; return 0 ;;
+    esac
+  done
+  printf '%s' "$MODEL"
+}
 REVIEW_MODEL="${DSH_WORKER_REVIEW_MODEL:-$MODEL}"
 REVIEW_RULES_FILE="${DSH_WORKER_REVIEW_RULES_FILE:-REVIEW.md}"
 KEEP_RUNS="${DSH_WORKER_KEEP_RUNS:-10}"
@@ -231,8 +247,9 @@ review_item() {
     echo "worker: GNU timeout unavailable — review runs without a hard cap (provision the box)" >&2
   fi
   rc=0
+  ITEM_REVIEW_MODEL="$(model_for "$repo")"
   "${REVIEW_TIMEOUT_ARGS[@]+"${REVIEW_TIMEOUT_ARGS[@]}"}" \
-    env DSH_SHIP_REPO="$repo" DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$REVIEW_MODEL" \
+    env DSH_SHIP_REPO="$repo" DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$ITEM_REVIEW_MODEL" \
     DSH_REVIEW_RULES_FILE="$REVIEW_RULES_FILE" DSH_WORKTREE="$work" PR_NUM="$num" \
     DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
     bash "$DSH_BOT_DIR/scripts/review-pr.sh" || rc=$?
@@ -332,7 +349,8 @@ process_item() {
     echo "worker: GNU timeout unavailable — running without a hard per-task cap (set DSH_WORKER_TIMEOUT_MIN + provision the box)" >&2
   fi
   rc=0
-  ( cd "$work" && export THREAD_CONTEXT REPLY_TARGET="$kind #$num" DSH_MODEL="$MODEL" DSH_BOT_DIR="$DSH_BOT_DIR" DSH_RUNNER_NAME="$WORKER_NAME" \
+  ITEM_MODEL="$(model_for "$repo")"
+  ( cd "$work" && export THREAD_CONTEXT REPLY_TARGET="$kind #$num" DSH_MODEL="$ITEM_MODEL" DSH_BOT_DIR="$DSH_BOT_DIR" DSH_RUNNER_NAME="$WORKER_NAME" \
       "${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$TASK" ) \
     | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" | tee "$rundir/agent-output.txt" >/dev/null
   rc=$?   # pipefail → the driver's rc (timeout 124 included)

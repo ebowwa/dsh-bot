@@ -211,3 +211,11 @@ test("live fixes (seed-dshbot): Basic-auth git header, $(cat) note bodies, brack
   // upgrade path: the canonical line is always re-enforced
   assert.match(inst, /canonical line enforced/);
 });
+
+test("per-repo model map: mapped repos run their own model, unmapped run the fleet default", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /DSH_WORKER_MODEL_MAP/);
+  assert.match(w, /model_for\(\) \{/);
+  assert.match(w, /DSH_MODEL="\$ITEM_MODEL"/, "agent runs use the per-item model");
+  assert.match(w, /DSH_REVIEW_MODEL="\$ITEM_REVIEW_MODEL"/, "reviews use the per-item model");
+});
