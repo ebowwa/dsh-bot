@@ -36,6 +36,12 @@
 #                       push-credential resolver.
 #   DSH_WORKER_DATA_ROOT    run artifacts root (default $HOME/.dsh-worker)
 #   DSH_WORKER_MODEL        agent model (default zai/glm-5.3)
+#   DSH_WORKER_MODEL_RULES  task-class routing, space-separated
+#                       "pattern=model" entries matched (case-blind)
+#                       against the ticket key + title text BEFORE the
+#                       repo map — e.g. "reviewfix|docs|bump=zai/glm-5.3-flash
+#                       refactor=zai/glm-5.3". First match wins; no match
+#                       falls through to the repo map / fleet default.
 #   DSH_WORKER_MODEL_MAP    per-repo model overrides, space-separated
 #                       "owner/repo=provider/model" entries — a repo listed
 #                       here runs its agents/reviews on that model (restores
@@ -106,13 +112,26 @@ ACK_MARKER="${DSH_WORKER_ACK_MARKER:-dsh:ack}"
 MODEL="${DSH_WORKER_MODEL:-zai/glm-5.3}"
 # model_for <owner/repo> — per-repo override when mapped, else the fleet
 # default (charset-validated the same way DSH_MODEL is in the driver).
-model_for() {
-  local entry
+model_for() { # <owner/repo> [ticket-text]
+  local repo="$1" text="${2:-}" entry rule
+  # 1. task-class rules ("pattern=model", | alternation, case-blind grep
+  #    over "#repo ticket-text") — the token-milking tier: mechanical
+  #    classes ride the cheap twin, first match wins
+  if [ -n "$text" ] && [ -n "${DSH_WORKER_MODEL_RULES:-}" ]; then
+    for entry in ${DSH_WORKER_MODEL_RULES}; do
+      rule="${entry#*=}"; pat="${entry%%=*}"
+      if printf '#%s %s' "$repo" "$text" | grep -qiE "${pat//|/|}"; then
+        printf '%s' "$rule"; return 0
+      fi
+    done
+  fi
+  # 2. per-repo map
   for entry in ${DSH_WORKER_MODEL_MAP:-}; do
     case "$entry" in
-      "$1="*) printf '%s' "${entry#*=}"; return 0 ;;
+      "$repo="*) printf '%s' "${entry#*=}"; return 0 ;;
     esac
   done
+  # 3. fleet default
   printf '%s' "$MODEL"
 }
 REVIEW_MODEL="${DSH_WORKER_REVIEW_MODEL:-$MODEL}"
@@ -339,6 +358,13 @@ dashboard_update() { # <repo>
   procs="$(pgrep -fc 'dsh --profile headless' 2>/dev/null || echo 0)"
   inflight="$(for lk in "$ITEM_SLOTS"/*.lock; do [ -e "$lk" ] || continue; printf '%s ' "$(basename "$lk" .lock)"; done)"
   recent="$(ls -1t "$DATA/runs" 2>/dev/null | head -5 | tr '\n' ' ')"
+  local tin=0 tout=0 nmeta=0 metaf
+  for metaf in "$DATA"/runs/*/dsh-run-meta.env; do
+    [ -f "$metaf" ] || continue
+    nmeta=$((nmeta+1))
+    tin=$((tin + $(grep -oE '^DSH_RUN_TOKENS_IN=[0-9]+' "$metaf" 2>/dev/null | cut -d= -f2 || echo 0)))
+    tout=$((tout + $(grep -oE '^DSH_RUN_TOKENS_OUT=[0-9]+' "$metaf" 2>/dev/null | cut -d= -f2 || echo 0)))
+  done
   body="$(printf '<!-- dsh:dashboard -->
 **dsh fleet dashboard** — updated every sweep (~60s) by the worker.
 
@@ -351,7 +377,8 @@ dashboard_update() { # <repo>
 | in-flight items | %s |
 | recent runs | %s |
 | model lanes | fleet=%s map=%s |
-' "$q" "$r" "$slots" "$CONCURRENCY" "$procs" "${inflight:-none}" "${recent:-none}" "$MODEL" "${DSH_WORKER_MODEL_MAP:-none}")"
+| tokens (kept runs) | in=%s out=%s across %s runs |
+' "$q" "$r" "$slots" "$CONCURRENCY" "$procs" "${inflight:-none}" "${recent:-none}" "$MODEL" "${DSH_WORKER_MODEL_MAP:-none}" "$tin" "$tout" "$nmeta")"
   gh issue edit "$num" --repo "$repo" --body "$body" >/dev/null 2>&1 || true
 }
 
@@ -421,7 +448,7 @@ review_item() {
     echo "worker: GNU timeout unavailable — review runs without a hard cap (provision the box)" >&2
   fi
   rc=0
-  ITEM_REVIEW_MODEL="$(model_for "$repo")"
+  ITEM_REVIEW_MODEL="$(model_for "$repo" "review pr #$num")"
   "${REVIEW_TIMEOUT_ARGS[@]+"${REVIEW_TIMEOUT_ARGS[@]}"}" \
     env DSH_SHIP_REPO="$repo" DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$ITEM_REVIEW_MODEL" \
     DSH_REVIEW_RULES_FILE="$REVIEW_RULES_FILE" DSH_WORKTREE="$work" PR_NUM="$num" \
@@ -487,7 +514,7 @@ task_item() {
   fi
 
   # model resolution: the task's explicit model > the repo map > fleet default
-  ITEM_MODEL="${t_model:-$(model_for "$repo")}"
+  ITEM_MODEL="${t_model:-$(model_for "$repo" "$task")}"
 
   # checkout: default branch (worktree from the shared store), or the
   # requested ref when present in the store
@@ -631,7 +658,7 @@ process_item() {
     echo "worker: GNU timeout unavailable — running without a hard per-task cap (set DSH_WORKER_TIMEOUT_MIN + provision the box)" >&2
   fi
   rc=0
-  ITEM_MODEL="$(model_for "$repo")"
+  ITEM_MODEL="$(model_for "$repo" "$TASK")"
   # Same two rules as task_item: the export terminates with && (never a
   # backslash continuation into the command — that made the driver an
   # argument of export), and the pipeline's rc is captured with || rc=$?

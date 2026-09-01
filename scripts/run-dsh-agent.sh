@@ -358,6 +358,7 @@ DSH_VERSION_RESOLVED="$(dsh --version 2>/dev/null | tail -n1 | tr -d '[:space:]'
   echo "DSH_RUN_PROVIDER=${PROVIDER}"
   echo "DSH_RUN_DSH_VERSION=${DSH_VERSION_RESOLVED}"
 } > "$DSH_META_DIR/dsh-run-meta.env" 2>/dev/null || true
+export DSH_META_ACC="$DSH_META_DIR/dsh-run-meta.env"
 
 
 # --- 2. harness home + settings (zai provider, glm-5.3 default) ------------
@@ -754,6 +755,33 @@ echo "::endgroup::" >&2
 # The session transcript on the runner contains everything the agent saw,
 # including any secret a tool result echoed. Default: delete it. Set
 # DSH_KEEP_SESSIONS=1 to keep transcripts for debugging.
+# Token accounting: the session's LAST usage record (input/output tokens)
+# rides the run meta before any cleanup — you cannot milk what you do not
+# measure. Best-effort: a missing record leaves the fields absent.
+SESSION_PATH_ACC="$(cat "${DSH_SESSION_PATH_FILE:-${TMPDIR:-/tmp}/dsh-session-path.$$}" 2>/dev/null || true)"
+if [ -n "$SESSION_PATH_ACC" ] && command -v zstd >/dev/null 2>&1 && command -v node >/dev/null 2>&1; then
+  zstd -dc "$SESSION_PATH_ACC" 2>/dev/null \
+    | node -e '
+      let last = null;
+      const rl = require("readline").createInterface({ input: process.stdin });
+      rl.on("line", (l) => {
+        try {
+          const j = JSON.parse(l);
+          const u = j?.usage ?? j?.message?.usage ?? j?.tokenUsage;
+          if (u && (u.input != null || u.prompt_tokens != null)) last = u;
+        } catch {}
+      });
+      rl.on("close", () => {
+        if (!last) return;
+        const inn = last.input ?? last.prompt_tokens ?? "?";
+        const out = last.output ?? last.completion_tokens ?? "?";
+        try { require("fs").appendFileSync(process.env.DSH_META_ACC ?? "/dev/null",
+          `DSH_RUN_TOKENS_IN=${inn}
+DSH_RUN_TOKENS_OUT=${out}
+`); } catch {}
+      });
+    ' >/dev/null 2>&1 || true
+fi
 if [ "${DSH_KEEP_SESSIONS:-0}" != "1" ]; then
   SESSION_PATH="$(cat "${DSH_SESSION_PATH_FILE:-${TMPDIR:-/tmp}/dsh-session-path.$$}" 2>/dev/null || true)"
   if [ -n "$SESSION_PATH" ]; then

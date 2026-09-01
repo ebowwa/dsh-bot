@@ -230,7 +230,7 @@ test("task queue: dispatched tasks run on the worker (the last runner-holding pa
   // the marker is REQUIRED — a user-labeled issue is never a task
   assert.match(w, /without the dsh:task marker/);
   // per-task model beats the repo map (dispatch semantics preserved)
-  assert.match(w, /ITEM_MODEL="\$\{t_model:-\$\(model_for "\$repo"\)\}"/);
+  assert.match(w, /ITEM_MODEL="\$\{t_model:-\$\(model_for "\$repo" "\$task"\)\}"/, "marker wins; router sees ticket text");
   // dispatch semantics: the agent pushes itself (REPLY_TARGET empty)
   assert.match(w, /REPLY_TARGET="" DSH_BOT_DIR/);
   // timeout cap applies to tasks too
@@ -327,4 +327,26 @@ test("agent message schema: structured dsh:msg blocks become a machine section",
   assert.match(w, /\/dsh:msg/);
   assert.match(w, /agent-messages\.txt/);
   assert.match(w, /agent messages on this thread/);
+});
+
+test("model router: class rules beat the repo map, ticket text feeds the match", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /DSH_WORKER_MODEL_RULES/);
+  assert.match(w, /model_for\(\) \{ # <owner\/repo> \[ticket-text\]/);
+  assert.match(w, /grep -qiE/);
+  // every call site routes with ticket text
+  assert.match(w, /model_for "\$repo" "\$task"/);
+  assert.match(w, /model_for "\$repo" "review pr #\$num"/);
+  assert.match(w, /model_for "\$repo" "\$TASK"/);
+  // per-task explicit override still wins (dispatch marker)
+  assert.match(w, /ITEM_MODEL="\$\{t_model:-/);
+});
+
+test("token accounting: usage rides the meta; the dashboard rolls it up", () => {
+  const drv = read("scripts/run-dsh-agent.sh");
+  assert.match(drv, /DSH_RUN_TOKENS_IN/);
+  assert.match(drv, /DSH_RUN_TOKENS_OUT/);
+  assert.match(drv, /you cannot milk what you do not/);
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /tokens \(kept runs\)/);
 });
