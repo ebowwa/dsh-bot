@@ -31,6 +31,10 @@ on:
         description: "DSH_WORKER_REPOS — space-separated owner/repo list this box serves"
         type: string
         default: "ebowwa/dsh-bot"
+      model-map:
+        description: "DSH_WORKER_MODEL_MAP — space-separated owner/repo=provider/model per-repo overrides (optional)"
+        type: string
+        default: ""
       activation-sweep:
         description: "Run one real sweep in-job after install (claims + completes any queued item; holds this runner for that duration — one-time per deploy)"
         type: boolean
@@ -52,6 +56,7 @@ jobs:
           WORKER_GH_CRED: ${{ secrets.BOT_PAT }}
           WORKER_DOPPLER_CRED: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
           WORKER_REPOS: ${{ inputs.repos }}
+          WORKER_MODEL_MAP: ${{ inputs.model-map }}
         run: |
           set -euo pipefail
           bash scripts/install-worker.sh
