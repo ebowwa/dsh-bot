@@ -293,3 +293,20 @@ test("no hardcoded model label on ANY produced surface (the ack-progress edit in
   const ship = read("scripts/ship-changes.sh");
   assert.ok(!ship.includes("dsh agent (GLM-5.3)"), "the shipper's ack edit must stamp, not hardcode");
 });
+
+test("bounded item concurrency: slots, background items, skip-not-fail when full", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /CONCURRENCY="\$\{DSH_WORKER_CONCURRENCY:-3\}"/);
+  assert.match(w, /run_item_bg\(\) \{/);
+  assert.match(w, /slot_take\(\) \{/);
+  // skip-not-fail: slot-full leaves the item for the next sweep
+  assert.match(w, /slots full.*leaving.*for the next sweep/);
+  // every item type launches through the slot runner
+  for (const call of ["run_item_bg \"w-$repo-$num\" process_item",
+                      "run_item_bg \"r-$repo-$num\" review_item",
+                      "run_item_bg \"t-$repo-$num\" task_item"]) {
+    assert.ok(w.includes(call), "slotted launch missing: " + call);
+  }
+  // lock cleanup on exit
+  assert.match(w, /trap 'rm -f "\$ITEM_LOCK"' EXIT/);
+});
