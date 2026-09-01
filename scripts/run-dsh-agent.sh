@@ -35,6 +35,14 @@
 #                         an existing executable file — both fail loud (a pin
 #                         containing a space splits at the separator before the
 #                         charset test; the filesystem check catches it).
+#   DSH_SEARCH_COMPOSE  set to 1 to mount the composition search tool
+#                       (plugins/tool-search-compose — counts/file-lists/
+#                       case-fold/context/total-cap/ordering in one search
+#                       call). The launcher copies the packaged plugin into
+#                       the profile module tree and stamps the overlay; its
+#                       @deepseek-ai deps resolve through the profile's flat
+#                       fallback (the f2972e7 bare-path mount resolved
+#                       nothing). Unset = off, byte-identical launch line.
 #   DOPPLER_SERVICE_TOKEN required by `doppler run`
 #   DSH_CELL_BIN        persistent prefix for the cell-tool bootstrap
 #                       (default $HOME/.dsh-bot-bin); the relay/reply
@@ -580,6 +588,58 @@ if [ -n "${DSH_WEB_SEARCH_CELLS:-}" ] && [ -n "${RUNNER_NAME:-}" ]; then
       echo "web-search-browser: mounted for this run (searchProvider: headless-browser; tool-web fetch: true; $WEB_COPY_NOTE)" >&2
   fi
 fi
+# --- 2f. composition search tool (default-off) -----------------------------
+# DSH_SEARCH_COMPOSE=1 mounts plugins/tool-search-compose (issue #40) — the
+# grep|head/wc/sort composition layer the transcript measurement demanded.
+# The f2972e7 mount crashed every launch because the overlay pointed at the
+# BARE IN-TREE PATH (./plugins/tool-search-compose/index.js): it resolves
+# relative to the profile directory at boot, and no node_modules sits beside
+# a script checkout, so the plugin's bare @deepseek-ai imports had nothing
+# to resolve against. The packaging fix is the web-search-browser pattern
+# (section 2e): the plugin ships as a real package (package.json + lib/) and
+# is COPIED into the profile module tree ($DSH_HOME/profiles/node_modules/
+# @dsh-bot/), where @deepseek-ai/dsh-tools and @deepseek-ai/dsh-tool-fs-search
+# resolve through the profile's flat fallback (hoisted by the dsh install —
+# nothing per-cell to provision, unlike the web provider). The patch overlay
+# then names the PACKAGE, never a path. Default off: opt-in per caller, no
+# silent fleet-wide flip. Overlay REGENERATED every run (same idempotence
+# rule as every stamp in this script); the row rides insert: because a bare
+# row with an unknown id only warns and is silently skipped.
+COMPOSE_PATCH_FILE=""
+if [ "${DSH_SEARCH_COMPOSE:-}" = "1" ]; then
+  COMPOSE_PLUGIN_SRC="$SCRIPT_DIR/../plugins/tool-search-compose"
+  if [ ! -f "$COMPOSE_PLUGIN_SRC/package.json" ] || [ ! -f "$COMPOSE_PLUGIN_SRC/lib/index.js" ]; then
+    echo "error: DSH_SEARCH_COMPOSE=1 but the plugin package is missing or incomplete at $COMPOSE_PLUGIN_SRC (need package.json + lib/index.js)" >&2
+    echo "hint: the mount is a packaged plugin, not a bare script path — an incomplete copy is a dead mount, and a dead mount must never look like a working one" >&2
+    exit 2
+  fi
+  mkdir -p "$DSH_HOME/profiles/node_modules/@dsh-bot"
+  COMPOSE_PLUGIN_DST="$DSH_HOME/profiles/node_modules/@dsh-bot/tool-search-compose"
+  # Same-tree guard (section 2e, review r1 finding 1): structurally
+  # unreachable while DSH_HOME is minted or pointed at ~/.dsh, but a
+  # DSH_HOME set INSIDE this plugin's directory would otherwise rm -rf the
+  # copy's own source before copying from it.
+  COMPOSE_SRC_REAL="$(cd "$(dirname "$COMPOSE_PLUGIN_SRC")" && pwd -P)/$(basename "$COMPOSE_PLUGIN_SRC")"
+  COMPOSE_DST_REAL="$(cd "$(dirname "$COMPOSE_PLUGIN_DST")" && pwd -P)/$(basename "$COMPOSE_PLUGIN_DST")"
+  if [ "$COMPOSE_SRC_REAL" != "$COMPOSE_DST_REAL" ]; then
+    rm -rf "$COMPOSE_PLUGIN_DST"
+    cp -R "$COMPOSE_PLUGIN_SRC" "$COMPOSE_PLUGIN_DST"
+    COMPOSE_COPY_NOTE="plugin copied from $COMPOSE_PLUGIN_SRC"
+  else
+    COMPOSE_COPY_NOTE="source IS the canonical copy — re-copy skipped (same-tree guard)"
+  fi
+  COMPOSE_PATCH_FILE="$DSH_HOME/search-compose.patch.yml"
+  {
+    echo "# Stamped by run-dsh-agent.sh (DSH_SEARCH_COMPOSE=1; regenerated every run)."
+    echo "# Composition search tool (issue #40). The package is copied into the profile"
+    echo "# module tree above, so its @deepseek-ai deps resolve through the flat fallback;"
+    echo "# insert: because a bare row with an unknown id only warns and is silently skipped."
+    echo "- insert:"
+    echo "    - id: tool-search-compose"
+    echo "      name: '@dsh-bot/tool-search-compose'"
+  } > "$COMPOSE_PATCH_FILE"
+  echo "search-compose: mounted for this run ($COMPOSE_COPY_NOTE)" >&2
+fi
 # Array + ${arr[@]+...} guard: set -u with an empty array is an error on
 # bash 3.2 (the mac cells' /bin/bash) — the guard expands to nothing instead.
 DSH_LAUNCH_ARGS=()
@@ -588,6 +648,9 @@ if [ -n "$SUBAGENT_PATCH_FILE" ]; then
 fi
 if [ -n "$WEB_PATCH_FILE" ]; then
   DSH_LAUNCH_ARGS+=(--patch "$WEB_PATCH_FILE")
+fi
+if [ -n "$COMPOSE_PATCH_FILE" ]; then
+  DSH_LAUNCH_ARGS+=(--patch "$COMPOSE_PATCH_FILE")
 fi
 
 # --- 3. Doppler-injected run, with live progress ---------------------------

@@ -31,7 +31,8 @@ Two execution modes:
 | `scripts/post-reply.sh` | thread reply (ack-comment edit or fresh comment), shared by both modes |
 | `scripts/review-pr.sh` | worker-side adversarial review (REVIEW.md from the PR base; verdict → labels) |
 | `scripts/review-verdict.mjs` | line-strict verdict extraction (APPROVE / REQUEST CHANGES; fail-closed on absence) |
-| `scripts/run-dsh-agent.sh` | driver: dsh install, settings bootstrap, gh/git identity, scrub shims, live trace, Doppler exec; head model via `DSH_MODEL`, subagent/subagent_fork children via `DSH_SUBAGENT_MODEL` (unset = inherit the head); local web search + fetch via `DSH_WEB_SEARCH_CELLS` (per-cell, default off) |
+| `scripts/run-dsh-agent.sh` | driver: dsh install, settings bootstrap, gh/git identity, scrub shims, live trace, Doppler exec; head model via `DSH_MODEL`, subagent/subagent_fork children via `DSH_SUBAGENT_MODEL` (unset = inherit the head); local web search + fetch via `DSH_WEB_SEARCH_CELLS` (per-cell, default off); composition search tool via `DSH_SEARCH_COMPOSE=1` (default off) |
+| `plugins/tool-search-compose/` | the composition search tool — counts, file-lists, case-folding, context, total result caps, path/mtime ordering in one search call (see its README for the packaging contract) |
 | `scripts/scrub-output.mjs` | redaction (creds/PII/SSH keys in both directions; IP/host/path/date on outputs) |
 | `scripts/gh-scrub-shim`, `git-scrub-shim` | the scrubber BETWEEN agent and GitHub/git |
 | `scripts/dsh-progress.mjs` | live JSON trace of reasoning/tool events |
@@ -96,3 +97,15 @@ rows replace whole plugin config — and inserts the provider row through the
 loader's `insert:` grammar (a bare row whose id is unknown only warns and
 is silently skipped). No API key is involved anywhere; search and fetch
 both run locally on the cell.
+
+## Composition search tool (default off)
+
+`DSH_SEARCH_COMPOSE=1` mounts [`plugins/tool-search-compose/`](plugins/tool-search-compose/README.md)
+— one `search` call replacing the `grep | head/wc/sort` pipe shapes
+(per-file counts, file lists, case-folding, context, a total result cap,
+path/mtime ordering). The plugin ships as a real package that the launcher
+copies into the profile module tree, where its `@deepseek-ai/*` deps resolve
+through the profile's flat fallback — the packaging that failed at f2972e7,
+where the overlay pointed at the bare in-tree script path and resolved
+nothing. Requires no per-cell provisioning; unset stays a byte-identical
+launch line.
