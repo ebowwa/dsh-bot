@@ -201,7 +201,13 @@ test("live fixes (seed-dshbot): Basic-auth git header, $(cat) note bodies, brack
   assert.ok(!/-f body=@/.test(w), "@file bodies must not be used (did not expand on the box gh)");
   assert.match(w, /-f body="\$\(cat \$rundir\//);
   const inst = read("scripts/install-worker.sh");
-  assert.match(inst, /'\[d\]sh-worker\.sh --once'/);
-  // upgrade path: a previously installed self-matching line gets REPLACED
+  // keepalive overlap guard is flock — EVERY pgrep form self-matches the
+  // carrier's cmdline (which contains the real script path in the sweep
+  // braces); proven live twice on seed-dshbot
+  const line = inst.split("\n").find(l => l.startsWith('LINE="'));
+  assert.ok(line, "the keepalive LINE is defined");
+  assert.match(line, /flock -n /, "flock overlap guard");
+  assert.ok(!line.includes("pgrep"), "no pgrep in the keepalive line (self-matching class)");
+  // upgrade path: the canonical line is always re-enforced
   assert.match(inst, /canonical line enforced/);
 });

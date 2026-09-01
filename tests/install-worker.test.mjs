@@ -38,13 +38,19 @@ if [ "$1" = "-l" ]; then cat "${store}"; exit 0; fi
 cat > "${store}"
 `);
   chmodSync(path.join(shim, "crontab"), 0o755);
+  const flockLog = path.join(dir, "flock-calls.log");
+  writeFileSync(path.join(shim, "flock"), `#!/usr/bin/env bash
+echo "flock $*" >> "${flockLog}"
+exit 0
+`);
+  chmodSync(path.join(shim, "flock"), 0o755);
   const gitLog = path.join(dir, "git-calls.log");
   writeFileSync(path.join(shim, "git"), `#!/usr/bin/env bash
 echo "git $*" >> "${gitLog}"
 exit 0
 `);
   chmodSync(path.join(shim, "git"), 0o755);
-  return { dir, home, botDir, store, crontabLog, gitLog,
+  return { dir, home, botDir, store, crontabLog, gitLog, flockLog,
     env: (extra = {}) => ({
       HOME: home,
       WORKER_GH_CRED: GH_CRED,
@@ -73,10 +79,11 @@ test("installs the env file 0600 with the values; cron line has NO credential", 
 
     const cron = readFileSync(f.store, "utf8");
     assert.match(cron, /dsh-worker\.sh --once/, "keepalive line installed");
-    // the guard must NOT self-match its wrapping shell (live defect on
-    // seed-dshbot: plain pattern matched the sh -c carrier, sweep never ran)
-    assert.match(cron, /pgrep -f '\[d\]sh-worker\.sh --once'/, "pgrep-guarded with the [d] bracket trick");
-    assert.ok(!cron.includes("pgrep -f 'dsh-worker.sh --once'"), "plain self-matching pattern must not ship");
+    // flock, never pgrep: EVERY pgrep form self-matches (the carrier's
+    // cmdline contains the real script path in the sweep braces — proven
+    // live twice). flock is the canonical cron mutual exclusion.
+    assert.match(cron, /flock -n .*sweep\.lock/, "flock-overlapped, no pgrep self-match possible");
+    assert.ok(!cron.includes("pgrep"), "no pgrep guard may ship in the keepalive");
     assert.match(cron, /checkout -q v1/, "re-pins to the moving v1 tag each sweep");
     assert.match(cron, /fetch --tags --force/, "force-moves the moving tag (plain fetch clobbers: \"would clobber existing tag\")");
     assert.ok(!cron.includes(GH_CRED), "NO credential in the cron line");
