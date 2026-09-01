@@ -1,0 +1,86 @@
+# dsh-bot: agent-comment-thin — the DECOUPLED comment trigger as a REUSABLE
+# workflow. THE trigger of the future: a ~20s github-hosted (ubuntu-latest)
+# job that does exactly two things — post the ack comment (with the
+# dsh:ack marker the worker matches) and enqueue the task (the queue label).
+# Everything heavy (agent run, shipping, reply, adversarial review) happens
+# out-of-band in scripts/dsh-worker.sh on the worker box — nothing here
+# holds a self-hosted runner, and the consumer needs NO self-hosted dsh
+# runners, NO DOPPLER_SERVICE_TOKEN, NO DSH_BOT_REPO_TOKEN.
+#
+# Consumer shells call this with `uses:`; their local file is a ~15-line
+# event shell (on:, the trust gate, secrets: inherit) — see
+# examples/dsh-agent-thin.yml.
+#
+# Queue contract (labels on the target issue/PR, set by the worker's
+# DSH_WORKER_QUEUE_LABEL/DSH_WORKER_RUN_LABEL; defaults below):
+#   dsh/queued   this trigger adds it (create-if-missing, idempotent)
+#   dsh/running  the worker swaps queued→running on claim
+#   (completion removes running; a newer trigger's queued stays queued)
+#
+# Inputs (both optional — the worker's DSH_WORKER_* env carries the rest):
+#   ack-marker   HTML marker baked into the ack comment so the worker can
+#                find and edit it (default dsh:ack — must match the
+#                worker's DSH_WORKER_ACK_MARKER)
+#   queue-label  queue label (default dsh/queued — must match
+#                DSH_WORKER_QUEUE_LABEL)
+
+name: agent-comment-thin
+
+on:
+  workflow_call:
+    inputs:
+      ack-marker:
+        description: "HTML marker baked into the ack comment (the worker matches it to edit the comment in place). Must equal the worker's DSH_WORKER_ACK_MARKER"
+        type: string
+        default: "dsh:ack"
+      queue-label:
+        description: "Queue label added to the issue/PR (must equal the worker's DSH_WORKER_QUEUE_LABEL)"
+        type: string
+        default: "dsh/queued"
+
+jobs:
+  dsh-agent-thin-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Lane impact: none — github-hosted; no self-hosted runner is held.
+      - name: Ack + enqueue (the whole trigger)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACK_MARKER: ${{ inputs.ack-marker }}
+          QUEUE_LABEL: ${{ inputs.queue-label }}
+          TARGET_KIND: ${{ (github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request) && 'pr' || 'issue' }}
+          TARGET_NUM: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          # Nothing to do unless the comment is actually a /dsh trigger.
+          COMMENT_BODY="$(node -e '
+            const e = JSON.parse(require("fs").readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
+            process.stdout.write(e.comment?.body ?? "");
+          ')"
+          case "$COMMENT_BODY" in
+            /dsh*|@dsh-agent*) ;;
+            *) echo "not a /dsh trigger; nothing to do"; exit 0 ;;
+          esac
+
+          # 1. Ack: one comment per task, marker-first so the worker's
+          #    marker match is exact, edited in place through the lifecycle.
+          ACK_BODY="<!-- $ACK_MARKER -->
+          **dsh agent** — :hourglass_flowing_sand: queued for the out-of-band worker.
+
+          _(this comment will be edited with the result — no runner is held by this trigger)_
+
+          <!-- run-${GITHUB_RUN_ID} -->"
+          ACK_ID="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${TARGET_NUM}/comments" \
+            -f body="$ACK_BODY" --jq .id 2>/dev/null || true)"
+          [ -n "$ACK_ID" ] && echo "ack comment: #${ACK_ID} (will be edited by the worker)" || echo "ack post failed (comment above shows why)"
+
+          # 2. Enqueue: label create-if-missing, then add (idempotent).
+          gh label create "$QUEUE_LABEL" --repo "$GITHUB_REPOSITORY" \
+            --force --color FBCA04 --description "dsh task queued (decoupled worker)" >/dev/null 2>&1 || true
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${TARGET_NUM}/labels" \
+            -f labels[]="$QUEUE_LABEL" >/dev/null 2>&1 \
+            || echo "enqueue failed (labels permission on the caller token?)" >&2
+
+          echo "queued ${TARGET_KIND} #${TARGET_NUM} (${QUEUE_LABEL}) — worker will pick it up"

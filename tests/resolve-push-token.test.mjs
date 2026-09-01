@@ -420,7 +420,10 @@ test("agent-comment.yml: persist-credentials false + resolver wired before agent
   assert.ok(wf.includes("resolve-push-token.sh"), "resolver must be invoked");
   const checkoutIdx = wf.indexOf("persist-credentials: false");
   const resolveIdx = wf.indexOf("Push credential (Doppler-first)");
-  const runIdx = wf.indexOf("- name: Run agent, ship, dispatch review");
+  // The comment-loop step was renamed when the shipper was extracted to
+  // scripts/ship-changes.sh ("Run agent (captures the before-state for the
+  // shipper)") — the ordering assertion below is unchanged in intent.
+  const runIdx = wf.indexOf("- name: Run agent");
   const shipIdx = wf.indexOf("- name: Ship any code changes as a PR");
   assert.ok([checkoutIdx, resolveIdx, runIdx, shipIdx].every((i) => i !== -1));
   assert.ok(checkoutIdx < resolveIdx && resolveIdx < runIdx && runIdx < shipIdx,

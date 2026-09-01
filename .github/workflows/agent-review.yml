@@ -1,4 +1,8 @@
-# dsh-bot: agent-review — the adversarial review stage as a REUSABLE workflow.
+# dsh-bot: agent-review — the adversarial review stage as a REUSABLE
+# workflow (LEGACY execution mode — kept for the migration window, and for
+# consumers who keep the review inside their own Actions. The decoupled
+# worker reviews inline via scripts/review-pr.sh instead — see
+# docs/decoupled-worker.md).
 # The consumer keeps a thin shell (on: workflow_dispatch + issue_comment
 # /review, the trust gate); this holds the whole review job.
 #
