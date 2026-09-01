@@ -39,13 +39,23 @@ CHECK WORKER_REPOS
 DSH_BOT_DIR="${DSH_BOT_INSTALL_DIR:-$HOME/dsh-bot}"
 WORKER_HOME="${DSH_WORKER_HOME:-$HOME/.dsh-worker}"
 
-# 1. toolkit checkout (clone once; the cron line keeps it pinned to v1)
+# 1. toolkit checkout (clone when absent) and ALWAYS refresh the pin to
+#    the current v1 release — a deploy must run what steady-state runs
+#    (the first activation ran a stale checkout and re-failed a fixed
+#    bug). safe.directory is set explicitly: the Actions runner's per-job
+#    HOME/gitconfig handling can trip git's ownership guard silently.
+#    No -q: nothing in this installer may fail quietly.
+PIN_OK=0
 if [ ! -d "$DSH_BOT_DIR/.git" ]; then
-  git clone --quiet https://github.com/ebowwa/dsh-bot.git "$DSH_BOT_DIR" \
+  git clone https://github.com/ebowwa/dsh-bot.git "$DSH_BOT_DIR" \
     || { echo "install-worker: toolkit clone failed (egress?)" >&2; exit 3; }
-  git -C "$DSH_BOT_DIR" fetch --tags --quiet
-  git -C "$DSH_BOT_DIR" checkout --quiet v1 \
-    || echo "install-worker: v1 tag not resolvable yet — cron will pin on the first sweep" >&2
+fi
+if git -c safe.directory="$DSH_BOT_DIR" -C "$DSH_BOT_DIR" fetch --tags \
+   && git -c safe.directory="$DSH_BOT_DIR" -C "$DSH_BOT_DIR" checkout v1; then
+  PIN_OK=1
+  echo "install-worker: toolkit pinned at $(git -c safe.directory="$DSH_BOT_DIR" -C "$DSH_BOT_DIR" describe --tags 2>/dev/null || echo v1)"
+else
+  echo "install-worker: WARNING — could not refresh the pin to v1; the toolkit runs its previous checkout (cron retries each sweep)" >&2
 fi
 
 # 2. env file — umask 177 so the file is born 0600; values never echoed

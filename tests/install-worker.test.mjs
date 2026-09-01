@@ -38,7 +38,13 @@ if [ "$1" = "-l" ]; then cat "${store}"; exit 0; fi
 cat > "${store}"
 `);
   chmodSync(path.join(shim, "crontab"), 0o755);
-  return { dir, home, botDir, store, crontabLog,
+  const gitLog = path.join(dir, "git-calls.log");
+  writeFileSync(path.join(shim, "git"), `#!/usr/bin/env bash
+echo "git $*" >> "${gitLog}"
+exit 0
+`);
+  chmodSync(path.join(shim, "git"), 0o755);
+  return { dir, home, botDir, store, crontabLog, gitLog,
     env: (extra = {}) => ({
       HOME: home,
       WORKER_GH_CRED: GH_CRED,
@@ -91,6 +97,21 @@ test("idempotent: a second run does not duplicate the cron line", () => {
     assert.match(res.stdout, /already present/, "second run reports the existing cron");
     const second = readFileSync(f.store, "utf8");
     assert.equal(second, first, "crontab unchanged by the second run");
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("always refreshes the toolkit pin to v1 (with safe.directory; no silent failures)", () => {
+  const f = fixture();
+  try {
+    const res = spawnSync("bash", [INSTALLER], { encoding: "utf8", env: f.env() });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stdout, /toolkit pinned at/);
+    const git = readFileSync(f.gitLog, "utf8");
+    assert.match(git, /fetch --tags/, "fetches tags every install");
+    assert.match(git, /checkout v1/, "checks out the moving v1 pin");
+    assert.match(git, /safe\.directory=/, "ownership guard explicitly satisfied");
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
