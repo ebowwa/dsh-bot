@@ -85,7 +85,11 @@ touch "$WORKER_HOME/worker.log" 2>/dev/null || true
 # sweep is running, this tick exits instantly; otherwise it runs.
 command -v flock >/dev/null 2>&1 \
   || { echo "install-worker: flock (util-linux) required for the keepalive — provision the box" >&2; exit 3; }
-LINE="* * * * * flock -n ${WORKER_HOME}/sweep.lock /bin/bash -c 'git -C ${DSH_BOT_DIR} fetch --tags --force -q && git -C ${DSH_BOT_DIR} checkout -q v1 || true; set -a; . ${WORKER_HOME}/env; set +a; ${DSH_BOT_DIR}/scripts/dsh-worker.sh --once >> ${WORKER_HOME}/worker.log 2>&1'"
+# The sweep is invoked via `bash <script>` (NEVER directly): the repo
+# ships scripts mode 644 — a direct invocation is "Permission denied"
+# (live-proven: the keepalive fired every minute from 17:52 and died at
+# exactly this word until fixed).
+LINE="* * * * * flock -n ${WORKER_HOME}/sweep.lock /bin/bash -c 'git -C ${DSH_BOT_DIR} fetch --tags --force -q && git -C ${DSH_BOT_DIR} checkout -q v1 || true; set -a; . ${WORKER_HOME}/env; set +a; exec /bin/bash ${DSH_BOT_DIR}/scripts/dsh-worker.sh --once >> ${WORKER_HOME}/worker.log 2>&1'"
 # The canonical-line rule: ALWAYS drop any existing dsh-worker line and
 # install the current one. Append-only idempotence ships upgrades never
 # (the box keeps its first, buggier line forever); rewrite-always is the

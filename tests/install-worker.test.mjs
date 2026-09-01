@@ -78,7 +78,7 @@ test("installs the env file 0600 with the values; cron line has NO credential", 
     assert.match(envBody, /DSH_WORKER_REPOS="ebowwa\/dsh-bot ebowwa\/github-activity-tracker"/);
 
     const cron = readFileSync(f.store, "utf8");
-    assert.match(cron, /dsh-worker\.sh --once/, "keepalive line installed");
+    assert.match(cron, /\/bin\/bash .*dsh-worker\.sh --once/, "sweep invoked via bash (scripts are mode 644 — direct exec is Permission denied)");
     // flock, never pgrep: EVERY pgrep form self-matches (the carrier's
     // cmdline contains the real script path in the sweep braces — proven
     // live twice). flock is the canonical cron mutual exclusion.
