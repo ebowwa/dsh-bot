@@ -388,7 +388,8 @@ sweep() {
       [ -n "$num" ] || continue
       process_item "$repo" "$num" "$is_pr" || echo "worker: $repo #$num failed (see above)" >&2
     done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${QUEUE_LABEL}&per_page=100" \
-      --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' 2>/dev/null || true)
+      --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' \
+      || echo "worker: poll FAILED for $repo label '$QUEUE_LABEL' (gh error above, if any)" >&2)
     # Review-only items (dsh/review): the decoupled review stage — reviews
     # of ANY PR run here, never in a runner-holding Actions job.
     echo "worker: polling $repo for label '$REVIEW_LABEL'"
@@ -404,7 +405,8 @@ sweep() {
         gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$REVIEW_LABEL")" >/dev/null 2>&1 || true
       fi
     done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${REVIEW_LABEL}&per_page=100" \
-      --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' 2>/dev/null || true)
+      --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' \
+      || echo "worker: poll FAILED for $repo label '$REVIEW_LABEL' (gh error above, if any)" >&2)
   done
 }
 

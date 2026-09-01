@@ -71,6 +71,8 @@ jobs:
           ls -la "$HOME/.dsh-worker" 2>/dev/null || echo "(no worker home)"
           echo "--- worker.log (last 15 lines, if any) ---"
           tail -n 15 "$HOME/.dsh-worker/worker.log" 2>/dev/null | node scripts/scrub-output.mjs || echo "(no worker.log — no sweep has ever run)"
+          echo "--- cron-eye repro: the poll EXACTLY as cron runs it ---"
+          env -i HOME="$HOME" PATH=/usr/bin:/bin /bin/bash -c 'set -a; . "$HOME/.dsh-worker/env"; set +a; gh api "repos/ebowwa/dsh-bot/issues?state=open&labels=dsh/review&per_page=100" --jq ".[].number" 2>&1 | head -5' || true
           echo "--- tool locations (cron PATH is /usr/bin:/bin) ---"
           for t in git node gh flock doppler; do command -v "$t" || echo "$t: NOT FOUND on job PATH"; done
           echo "--- systemctl --user (keepalive fallback probe) ---"
