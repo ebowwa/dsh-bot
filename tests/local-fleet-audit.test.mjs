@@ -43,8 +43,20 @@ exit 0
 ${plant ? 'echo "user 999 0.0 0.0 /usr/local/bin/dsh-node --lane linux"' : 'echo "user 1 0.0 0.0 /sbin/launchd"'}
 exit 0
 `);
-  spawnSync("chmod", ["+x", path.join(shim, "launchctl")]);
-  spawnSync("chmod", ["+x", path.join(shim, "ps")]);
+  // stub crontab + systemctl: the test must be hermetic against the HOST
+  // it runs on — the gates lane IS the worker box (its real crontab
+  // carries the keepalive, its systemd --user exists); a "clean" fixture
+  // is unbuildable there without stubbing every manager the audit reads
+  writeFileSync(path.join(shim, "crontab"), `#!/usr/bin/env bash
+${plant ? 'echo "* * * * * flock -n ~/.dsh-worker/sweep.lock /bin/bash ~/dsh-bot/scripts/dsh-worker.sh --once"' : 'exit 1'}
+exit 0
+`);
+  writeFileSync(path.join(shim, "systemctl"), `#!/usr/bin/env bash
+exit 1
+`);
+  for (const t of ["launchctl", "ps", "crontab", "systemctl"]) {
+    spawnSync("chmod", ["+x", path.join(shim, t)]);
+  }
   return { dir, home,
     env: { ...process.env, HOME: home, PATH: `${shim}${path.delimiter}${process.env.PATH}` } };
 };
