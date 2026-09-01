@@ -6,7 +6,8 @@
 #      shell input broken, is the change safe to auto-propagate,
 #   3. tags ONLY if the review approves (TAG or TAG-WITH-FINDINGS; findings
 #      ride along as release notes),
-#   4. writes a release on the tag with the agent's review as notes,
+#   4. writes a release on the tag with the agent's review as notes, and
+#      advances the moving major tag (@v1) consumers pin,
 #   5. notifies registered consumers (DSH_BOT_CONSUMERS repo variable) via
 #      repository_dispatch so each can open its own bump PR.
 #
@@ -59,10 +60,15 @@ jobs:
             MINOR="${LATEST#v*.}"; MINOR="${MINOR%%.*}"
           fi
           NEXT="v${MAJOR}.$((MINOR+1)).0"
+          # the moving major tag consumers actually pin (README "Consumers
+          # pin @v1") — derived from the same MAJOR that builds NEXT, so a
+          # future v2 release advances v2 automatically
+          MOVING="v${MAJOR}"
           {
             echo "base=$BASE"
             echo "latest=${LATEST:-none}"
             echo "next=$NEXT"
+            echo "moving=$MOVING"
           } >> "$GITHUB_OUTPUT"
           echo "--- diff scope $BASE..HEAD ---"
           git diff --stat "$BASE..HEAD" -- scripts '.github/workflows/agent-*.yml' config | tail -5
@@ -130,6 +136,7 @@ jobs:
           # is repo-scoped); falls back gracefully for public-mode consumers.
           PAT_TOKEN: ${{ secrets.DSH_BOT_REPO_TOKEN }}
           NEXT: ${{ steps.scope.outputs.next }}
+          MOVING: ${{ steps.scope.outputs.moving }}
           VERDICT: ${{ env.VERDICT }}
         run: |
           set -euo pipefail
@@ -152,8 +159,15 @@ jobs:
           else
             gh release create "$NEXT" --title "$NEXT" --notes "Automated release ${NEXT}. Agent review body unavailable; see the run log."
           fi
-          # advance the moving major tag
-          git tag -f v "$NEXT" && git push -q -f origin v
+          # advance the moving MAJOR tag — the pin consumers document (README
+          # "Consumers pin @v1"; examples/*.yml pin @v1). This step used to
+          # advance an undocumented bare 'v' instead, leaving v1 frozen at
+          # v1.0.9 through 33 releases (issue #38): every pinned consumer
+          # resolved @v1 to a stale toolkit while drift ran green. 'v' is
+          # retired — one moving tag per major, the documented pin. A test
+          # (tests/drift-moving-tag.test.mjs) fails if this step and the
+          # documented pin ever drift apart again.
+          git tag -f "$MOVING" "$NEXT" && git push -q -f origin "$MOVING"
           # notify registered consumers so each opens its own bump PR
           CONSUMERS="$(printf '%s' "${{ vars.DSH_BOT_CONSUMERS }}" | tr ',[:space:]' '\n')"
           while read -r repo; do

@@ -58,9 +58,12 @@ review contract is repo-specific).
 ## Versioning
 
 Consumers pin `@v1` (moving major tag). Breaking changes bump the major.
-Scrubber/security fixes land as minors and reach consumers only through a
-drift-check bump PR merged by each repo's own gates + review — the audit
-gate. Nothing propagates silently.
+drift-check advances `v1` to each new release it tags. There is no bare
+`v` moving tag: drift-check used to advance an undocumented `v` instead of
+`v1`, leaving every pinned consumer frozen on v1.0.9 through 33 releases
+(issue #38) — `v` is retired. Scrubber/security fixes land as minors and
+reach consumers only through a drift-check bump PR merged by each repo's
+own gates + review — the audit gate. Nothing propagates silently.
 
 ## Local web search + fetch (per-cell, default off)
 
