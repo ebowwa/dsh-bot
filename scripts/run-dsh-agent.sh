@@ -347,6 +347,18 @@ if ! command -v dsh >/dev/null 2>&1; then
   fi
 fi
 dsh --version >&2
+# Run meta: every downstream surface (reply comments, PR bodies, shipper
+# commits, review headers) stamps the model + harness version — the
+# driver is the only place that knows both. Written where the shipper and
+# reply steps read it (DSH_SHIP_CACHE, else the runner temp).
+DSH_META_DIR="${DSH_SHIP_CACHE:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}}"
+DSH_VERSION_RESOLVED="$(dsh --version 2>/dev/null | tail -n1 | tr -d '[:space:]')"
+{
+  echo "DSH_RUN_MODEL=${MODEL_ID}"
+  echo "DSH_RUN_PROVIDER=${PROVIDER}"
+  echo "DSH_RUN_DSH_VERSION=${DSH_VERSION_RESOLVED}"
+} > "$DSH_META_DIR/dsh-run-meta.env" 2>/dev/null || true
+
 
 # --- 2. harness home + settings (zai provider, glm-5.3 default) ------------
 mkdir -p "$DSH_HOME"

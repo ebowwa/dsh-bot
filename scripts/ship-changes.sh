@@ -60,6 +60,15 @@ export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
 
 cd "$DSH_WORKTREE" || { echo "ship-changes: cannot cd to $DSH_WORKTREE" >&2; exit 2; }
 
+# Run meta (written by the driver): commits and PR bodies carry the
+# model + harness stamp.
+DSH_META_FILE="${DSH_SHIP_CACHE:-${RUNNER_TEMP:-/tmp}}/dsh-run-meta.env"
+DSH_STAMP=""
+if [ -f "$DSH_META_FILE" ]; then
+  . "$DSH_META_FILE"
+  DSH_STAMP="dsh-bot: model=${DSH_RUN_MODEL:-?} harness=dsh-${DSH_RUN_DSH_VERSION:-?} run=${DSH_RUN_ID:-_}"
+fi
+
 # gh may sit outside the runner service PATH on self-hosted cells (secondsee
 # lane-lottery, 2026-08-26): probe the driver's persistent prefix + brew
 # prefixes before giving up. Identical list to the driver's CELL_PROBE_DIRS.
@@ -140,7 +149,9 @@ for B in $(git for-each-ref refs/heads/dsh --format='%(refname:short)'); do
   if ! grep -qx "$B" "$DSH_SHIP_CACHE/dsh-after-dsh-branches" 2>/dev/null; then
     if git push -u origin "$B" 2>&1; then
       NOTE="${NOTE:+$NOTE; }$(open_pr "$B" "dsh: ${DSH_TASK_TITLE:-$B}" \
-        --body "Automated PR from agent run ${DSH_RUN_ID} (branch pushed by shipper).")"
+        --body "Automated PR from agent run ${DSH_RUN_ID} (branch pushed by shipper).${DSH_STAMP:+
+
+$DSH_STAMP}")"
     fi
   fi
 done
@@ -159,12 +170,13 @@ if [ -n "$DIRTY" ] || [ "${AHEAD:-0}" -gt 0 ] 2>/dev/null; then
   git checkout -B "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
   if [ -n "$DIRTY" ]; then
     git add -A -- . ':!.dsh-bot'
-    git commit -m "dsh: automated ship of agent run ${DSH_RUN_ID}" --allow-empty 2>/dev/null || true
+    git commit -m "dsh: automated ship of agent run ${DSH_RUN_ID}" ${DSH_STAMP:+-m "$DSH_STAMP"} --allow-empty 2>/dev/null || true
   fi
   if git push -u origin "$BRANCH" 2>&1; then
     {
-      echo "Automated PR from **dsh agent (GLM-5.3)** run ${DSH_RUN_ID}."
+      echo "Automated PR from **dsh agent** run ${DSH_RUN_ID}."
       echo
+      if [ -n "$DSH_STAMP" ]; then echo "\`${DSH_STAMP}\`"; echo; fi
       echo "**Task:** ${DSH_TASK_TITLE:-_(see run log)_}"
       echo
       echo "---"

@@ -59,11 +59,23 @@ jobs:
           # and the worker matches the same contains form. The trigger must
           # too — a comment the gate accepts and the worker would accept
           # must never be silently dropped here.
-          COMMENT_BODY="$(node -e '
+          #
+          # ISSUE-BODY ISSUANCE: on issues.opened events there is no
+          # comment — the trigger text is the issue BODY (a bare "/dsh"
+          # means "the title IS the task"; the worker resolves it), or the
+          # TITLE itself when it opens with /dsh (title-only issuance).
+          TRIGGER_TEXT="$(node -e '
             const e = JSON.parse(require("fs").readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
-            process.stdout.write(e.comment?.body ?? "");
+            const c = e.comment?.body ?? "";
+            if (c.trim().length > 0) process.stdout.write(c);
+            else if (e.issue) {
+              const b = e.issue.body ?? "";
+              const t = e.issue.title ?? "";
+              if (b.startsWith("/dsh") || t.startsWith("/dsh")) process.stdout.write(b.startsWith("/dsh") && b.trim() !== "/dsh" ? b : t);
+              else process.stdout.write("");
+            } else process.stdout.write("");
           ')"
-          case "$COMMENT_BODY" in
+          case "$TRIGGER_TEXT" in
             /dsh*|*@dsh-agent*) ;;
             *) echo "not a /dsh trigger; nothing to do"; exit 0 ;;
           esac

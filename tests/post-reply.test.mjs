@@ -58,7 +58,7 @@ test("with ACK_COMMENT_ID the reply PATCHes the ack comment in place", () => {
     assert.match(log, /comments\/123/);
     assert.match(log, /PATCH/);
     const reply = readFileSync(path.join(f.cache, "reply.md"), "utf8");
-    assert.match(reply, /dsh agent \(GLM-5\.3\)/);
+    assert.match(reply, /\*\*dsh agent\*\* — run: run123/);  // stamped header (no hardcoded model without meta)
     assert.match(reply, /run: run123 /);
     assert.match(reply, /finished/);
     assert.match(reply, /\[redacted:token\]/);
@@ -95,6 +95,22 @@ test("requires TARGET_KIND and DSH_SHIP_REPO (fails loudly, never posts blind)",
     const res = spawnSync("bash", [POST_REPLY], { encoding: "utf8", env });
     assert.notEqual(res.status, 0);
     assert.match(res.stderr, /TARGET_KIND/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+test("with driver meta present, the reply stamps the model + harness", () => {
+  const f = fixture();
+  try {
+    writeFileSync(path.join(f.cache, "dsh-agent-output.txt"), "done.\n");
+    writeFileSync(path.join(f.cache, "dsh-run-meta.env"),
+      "DSH_RUN_MODEL=glm-5.3-flash\nDSH_RUN_PROVIDER=zai\nDSH_RUN_DSH_VERSION=0.1.0-rc.7\n");
+    const res = spawnSync("bash", [POST_REPLY], {
+      encoding: "utf8", env: f.env({ ACK_COMMENT_ID: "123" }),
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const reply = readFileSync(path.join(f.cache, "reply.md"), "utf8");
+    assert.match(reply, /model: glm-5\.3-flash · harness: dsh-0\.1\.0-rc\.7/);
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
