@@ -158,12 +158,15 @@ fetch_context() {
   } > "$outdir/thread-context.txt" 2>/dev/null || true
 }
 
-# trusted_task <repo> <num> <is_pr> <outfile> — the last /dsh comment from a
-# trusted author (same trust definition as the trigger shell: not a bot,
-# author_association in OWNER/MEMBER/COLLABORATOR). Writes the RAW comment
-# body; the caller strips the trigger prefix.
+# trusted_task <repo> <num> <is_pr> <outfile> — the task source, in order:
+#   1. the last /dsh COMMENT from a trusted author (comments carry their
+#      own author_association), then PR review comments;
+#   2. the ISSUE BODY when it opens with /dsh and the ISSUE AUTHOR is
+#      trusted (minimal issuance: "/dsh " in the body, task = the title);
+#   3. the TITLE when it opens with /dsh (title-only issuance).
+# Trust is always re-derived from the API — never from the label.
 trusted_task() {
-  local repo="$1" num="$2" is_pr="$3" out="$4" body
+  local repo="$1" num="$2" is_pr="$3" out="$4" body issue_json
   body="$(gh api "repos/${repo}/issues/${num}/comments?per_page=100" --jq '
     [.[] | select(((.body // "") | startswith("/dsh")) or ((.body // "") | contains("@dsh-agent")))
           | select(.user.type != "Bot")
@@ -175,6 +178,26 @@ trusted_task() {
             | select(.user.type != "Bot")
             | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")
       ][-1].body // ""' 2>/dev/null || true)"
+  fi
+  if [ -z "$body" ]; then
+    # body/title issuance: the ISSUE itself carries the trigger; the issue
+    # author's association is the trust (same set as comments). A bare
+    # "/dsh" body means "the title IS the task" (#474 shape).
+    issue_json="$(gh issue view "$num" --repo "$repo" --json body,title,authorAssociation 2>/dev/null || true)"
+    if [ -n "$issue_json" ]; then
+      body="$(printf '%s' "$issue_json" | node -e '
+        const j = JSON.parse(require("fs").readFileSync(0, "utf8"));
+        const trusted = ["OWNER", "MEMBER", "COLLABORATOR"].includes(j.authorAssociation);
+        const body = (j.body || "");
+        const title = (j.title || "").replace(/^\/dsh\s*/, "");
+        if (!trusted) process.stdout.write("");
+        else if (body.startsWith("/dsh")) {
+          const t = body.replace(/^\/dsh\s*/, "").trim();
+          process.stdout.write(t.length > 0 ? t : "/dsh " + title);
+        } else if ((j.title || "").startsWith("/dsh") && title.length > 0) {
+          process.stdout.write("/dsh " + title);
+        } else process.stdout.write("");' 2>/dev/null || true)"
+    fi
   fi
   printf '%s' "$body" > "$out"
 }

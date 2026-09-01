@@ -262,3 +262,29 @@ test("driver invocations terminate their export with && (the continuation bug, l
   const rcCaptures = (w.match(/agent-output\.txt" >\/dev\/null \|\| rc=\$\?/g) || []).length;
   assert.ok(rcCaptures >= 2, "both pipelines capture rc with || rc=$? (got " + rcCaptures + ")");
 });
+
+test("issue-body issuance: bare /dsh body means title-is-task; title-only works; trust re-derived", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /body\/title issuance: the ISSUE itself carries the trigger/);
+  // bare body "/dsh" → task = title; title "/dsh X" → task = X
+  assert.match(w, /t\.length > 0 \? t : "\/dsh " \+ title/);
+  assert.match(w, /\(j\.title \|\| ""\)\.startsWith\("\/dsh"\)/);
+  // trust from the ISSUE author's association, same set as comments
+  assert.match(w, /authorAssociation/);
+  const thin = read(".github/workflows/agent-comment-thin.yml");
+  assert.match(thin, /ISSUE-BODY ISSUANCE/);
+  assert.match(thin, /the title IS the task/);
+});
+
+test("model + harness stamped on every surface (driver meta file)", () => {
+  const drv = read("scripts/run-dsh-agent.sh");
+  assert.match(drv, /dsh-run-meta\.env/);
+  const pr = read("scripts/post-reply.sh");
+  assert.match(pr, /DSH_RUN_MODEL/);
+  assert.ok(!pr.includes("**dsh agent (GLM-5.3)**"), "no hardcoded model label in replies");
+  const ship = read("scripts/ship-changes.sh");
+  assert.match(ship, /harness=dsh-/);          // commit trailer + PR stamp
+  assert.match(ship, /DSH_STAMP/);
+  const rp = read("scripts/review-pr.sh");
+  assert.match(rp, /harness: dsh-/);           // review header
+});

@@ -59,8 +59,16 @@ command -v gh >/dev/null 2>&1 || {
   exit 0
 }
 
+# Run meta (written by the driver): every reply stamps the actual model
+# and harness version — never a hardcoded label.
+DSH_META_FILE="${DSH_SHIP_CACHE:-${RUNNER_TEMP:-/tmp}}/dsh-run-meta.env"
+DSH_STAMP="dsh-agent"
+if [ -f "$DSH_META_FILE" ]; then
+  . "$DSH_META_FILE"
+  DSH_STAMP="model: ${DSH_RUN_MODEL:-?} · harness: dsh-${DSH_RUN_DSH_VERSION:-?}"
+fi
 {
-  echo "**dsh agent (GLM-5.3)** — run: ${DSH_RUN_ID:-_} — lane: ${DSH_RUNNER_NAME:-unknown}"
+  echo "**dsh agent** — run: ${DSH_RUN_ID:-_} — lane: ${DSH_RUNNER_NAME:-unknown} — ${DSH_STAMP}"
   echo
   if [ -f "$DSH_AGENT_OUTPUT" ]; then
     node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$DSH_AGENT_OUTPUT" 2>/dev/null \
