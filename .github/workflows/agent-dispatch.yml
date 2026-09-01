@@ -1,4 +1,8 @@
-# dsh-bot: agent-dispatch — manual/scheduled task entry as a REUSABLE workflow.
+# dsh-bot: agent-dispatch — manual/scheduled task entry as a REUSABLE
+# workflow (LEGACY execution mode — kept for the migration window; it
+# executes the agent inside the Actions job that holds a self-hosted
+# runner. Decoupled mode runs manual/scheduled tasks on the worker via the
+# queue label instead — see docs/decoupled-worker.md).
 
 name: agent-dispatch
 

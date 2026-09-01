@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# dsh-worker.sh — the out-of-band worker for the DECOUPLED dsh-bot mode.
+#
+# The decouple: the comment-triggered loop no longer executes the agent
+# inside the Actions job that holds a self-hosted runner for up to 120
+# minutes. Instead:
+#   - a thin ~20s trigger (agent-comment-thin.yml, github-hosted
+#     ubuntu-latest) posts the ack comment and adds the queue label;
+#   - THIS worker, running as an always-on process on the factory pool
+#     boxes (cron keepalive or systemd — see docs/decoupled-worker.md),
+#     polls the queue, claims items, runs the headless agent, ships, and
+#     replies — and runs the adversarial review stage inline.
+#
+# Queue = GitHub-native labels on the target issue/PR:
+#   dsh/queued   (added by the trigger; the item is pending)
+#   dsh/running  (claim: the worker DELETE-removes queued — the claim is
+#                 atomic-ish; a second worker racing the same item gets a
+#                 404 on the DELETE and skips it)
+#   (completion removes dsh/running; a fresh dsh/queued from a newer
+#   trigger comment is left in place for the next sweep)
+#
+# Usage:
+#   dsh-worker.sh --once   one sweep: claim + process every queued item
+#   dsh-worker.sh --loop   sweep forever (service mode; --tick N between)
+#
+# Env contract:
+#   GH_TOKEN            required — the worker PAT (read + write on every
+#                       configured consumer repo; per-consumer least
+#                       privilege is a deployment decision, see docs)
+#   DSH_BOT_DIR         required — this toolkit's checkout (scripts/)
+#   DSH_WORKER_REPOS    required — space/comma-separated "owner/repo" list
+#                       of consumer repos to poll
+#   DOPPLER_SERVICE_TOKEN  optional — passed through to the driver and the
+#                       push-credential resolver (worker-side Doppler)
+#   DSH_WORKER_DATA_ROOT    run artifacts root (default $HOME/.dsh-worker)
+#   DSH_WORKER_MODEL        agent model (default zai/glm-5.3)
+#   DSH_WORKER_SUBAGENT_MODEL subagent children (default inherit head)
+#   DSH_WORKER_REVIEW_MODEL reviewer model (default $DSH_WORKER_MODEL)
+#   DSH_WORKER_REVIEW_RULES_FILE repo-relative rules (default REVIEW.md)
+#   DSH_WORKER_QUEUE_LABEL / DSH_WORKER_RUN_LABEL (defaults dsh/queued,
+#                       dsh/running)
+#   DSH_WORKER_ACK_MARKER   HTML marker the trigger bakes into the ack
+#                       comment so the worker can find it (default dsh:ack)
+#   DSH_WORKER_TIMEOUT_MIN  per-agent-run cap (default 120) — enforced via
+#                       GNU `timeout` when present; without it the worker
+#                       warns once and runs without a hard cap
+#   DSH_WORKER_KEEP_RUNS    how many run dirs to keep (default 10)
+#   DSH_WORKER_TICK_S       loop sleep seconds (default 60)
+#
+# Security posture (the honest delta vs. CI): the worker holds credentials
+# BETWEEN tasks — a long-lived BOT_PAT + optional Doppler token in its env
+# (see docs/decoupled-worker.md for the env-file + chmod 600 pattern). Per
+# TASK, nothing persists: DSH_HOME is job-scoped inside the run dir (the
+# driver's existing default), transcripts are deleted, and the run dir is
+# pruned. The token NEVER rides argv: git auth rides env-based git config
+# (-c would put the value on ps) and the .git/config extraheader written by
+# resolve-push-token.sh — the same discipline the CI flow uses.
+
+set -euo pipefail
+
+MODE="${1:---once}"
+TICK_S="${DSH_WORKER_TICK_S:-60}"
+
+CHECK_ENV() { # <varname> — required env, typed exit 2 (never run half-configured)
+  local v="$1"
+  if [ -z "${!v:-}" ]; then echo "dsh-worker: $v unset (required)" >&2; exit 2; fi
+}
+CHECK_ENV DSH_BOT_DIR
+CHECK_ENV GH_TOKEN
+CHECK_ENV DSH_WORKER_REPOS
+# The driver is always invoked via `bash script` (exec bit not guaranteed
+# on checkouts), so `-f`, not `-x`.
+[ -f "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" ] \
+  || { echo "dsh-worker: no runnable driver at $DSH_BOT_DIR/scripts/run-dsh-agent.sh" >&2; exit 2; }
+
+DATA="${DSH_WORKER_DATA_ROOT:-$HOME/.dsh-worker}"
+QUEUE_LABEL="${DSH_WORKER_QUEUE_LABEL:-dsh/queued}"
+RUN_LABEL="${DSH_WORKER_RUN_LABEL:-dsh/running}"
+ACK_MARKER="${DSH_WORKER_ACK_MARKER:-dsh:ack}"
+MODEL="${DSH_WORKER_MODEL:-zai/glm-5.3}"
+REVIEW_MODEL="${DSH_WORKER_REVIEW_MODEL:-$MODEL}"
+REVIEW_RULES_FILE="${DSH_WORKER_REVIEW_RULES_FILE:-REVIEW.md}"
+KEEP_RUNS="${DSH_WORKER_KEEP_RUNS:-10}"
+WORKER_NAME="worker-$(hostname -s 2>/dev/null || echo unknown)"
+export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
+
+# Repos → a space list. Accepts comma AND space separators.
+REPOS="$(printf '%s' "$DSH_WORKER_REPOS" | tr ',' ' ')"
+
+# label URL segment — label names contain a slash (dsh/queued)
+label_enc() { node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$1"; }
+
+ensure_labels() { # $1 = owner/repo
+  local repo="$1" c
+  gh label create "$QUEUE_LABEL" --repo "$repo" --force --color FBCA04 --description "dsh task queued (decoupled worker)" >/dev/null 2>&1 || true
+  gh label create "$RUN_LABEL"    --repo "$repo" --force --color 0E8A16 --description "dsh task running (decoupled worker)" >/dev/null 2>&1 || true
+}
+
+# git auth via ENV-based config (GIT_CONFIG_COUNT): the value rides the
+# environment, never argv — argv is ps-readable to any same-user process.
+# The PAT charset (alnum + underscore) is safe inside the quoted value.
+git_clone() { # <owner/repo> <dest>
+  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
+    GIT_CONFIG_VALUE_0="Authorization: token ${GH_TOKEN}" \
+    git clone --quiet --depth 1 "https://github.com/${1}.git" "$2"
+}
+
+# fetch_context <repo> <num> — thread context file (title/body + last 8
+# comments), same shape the CI flow builds.
+fetch_context() {
+  local repo="$1" num="$2"
+  {
+    gh issue view "$num" --repo "$repo" \
+      --json title,body \
+      --jq '"title: " + .title + "\nbody (truncated):\n" + ((.body // "")[0:1600])' || true
+    echo
+    echo "recent comments (last 8, truncated):"
+    gh api "repos/${repo}/issues/${num}/comments?per_page=100" \
+      --jq '.[-8:][] | "- " + .user.login + ": " + ((.body // "") | gsub("[\\r\\n]+"; " ") | .[0:280])' || true
+  } > "$1/thread-context.txt" 2>/dev/null || true
+}
+
+# trusted_task <repo> <num> <is_pr> <outfile> — the last /dsh comment from a
+# trusted author (same trust definition as the trigger shell: not a bot,
+# author_association in OWNER/MEMBER/COLLABORATOR). Writes the RAW comment
+# body; the caller strips the trigger prefix.
+trusted_task() {
+  local repo="$1" num="$2" is_pr="$3" out="$4" body
+  body="$(gh api "repos/${repo}/issues/${num}/comments?per_page=100" --jq '
+    [.[] | select(((.body // "") | startswith("/dsh")) or ((.body // "") | contains("@dsh-agent")))
+          | select(.user.type != "Bot")
+          | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")
+    ][-1].body // ""' 2>/dev/null || true)"
+  if [ -z "$body" ] && [ "$is_pr" = "true" ]; then
+    body="$(gh api "repos/${repo}/pulls/${num}/comments?per_page=100" --jq '
+      [.[] | select(((.body // "") | startswith("/dsh")) or ((.body // "") | contains("@dsh-agent")))
+            | select(.user.type != "Bot")
+            | select(.author_association == "OWNER" or .author_association == "MEMBER" or .author_association == "COLLABORATOR")
+      ][-1].body // ""' 2>/dev/null || true)"
+  fi
+  printf '%s' "$body" > "$out"
+}
+
+# ack_comment <repo> <num> — the id of the LAST comment carrying the ack
+# marker (the newest trigger's ack; the older arc-editing convention of the
+# CI flow collapses to "edit the newest ack in place" here).
+ack_comment() {
+  local repo="$1" num="$2"
+  gh api "repos/${repo}/issues/${num}/comments?per_page=100" \
+    --jq "[.[] | select((.body // \"\") | contains(\"${ACK_MARKER}\")) | .id][-1] // 0" 2>/dev/null || echo 0
+}
+
+# prune_runs — keep the newest KEEP_RUNS run dirs
+prune_runs() {
+  [ -d "$DATA/runs" ] || return 0
+  ls -1t "$DATA/runs" | tail -n +$((KEEP_RUNS + 1)) | while read -r d; do rm -rf "$DATA/runs/$d"; done
+}
+
+# process_item <repo> <num> <is_pr>
+process_item() {
+  local repo="$1" num="$2" is_pr="$3" kind runid rundir work task raw body thread ackid rc
+  kind="issue"; [ "$is_pr" = "true" ] && kind="pr"
+  runid="w$(date +%Y%m%d-%H%M%S)-$$"
+  rundir="$DATA/runs/$runid"
+  work="$rundir/repo"
+  mkdir -p "$rundir/tmp" "$work"
+  export TMPDIR="$rundir/tmp"
+  echo "==== worker [$runid] $repo #$num ($kind) ===="
+
+  # --- claim: remove the queued label; 404 = another worker took it ------
+  if ! gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$QUEUE_LABEL")" >/dev/null 2>&1; then
+    echo "worker: claim lost on $repo #$num (queued label gone) — skip"
+    rm -rf "$rundir"
+    return 0
+  fi
+  gh api -X POST "repos/${repo}/issues/${num}/labels" -f labels[]="$RUN_LABEL" >/dev/null 2>&1 || true
+
+  # --- thread context + task + ack pointer --------------------------------
+  fetch_context "$repo" "$num" "$rundir/ctx"
+  trusted_task "$repo" "$num" "$is_pr" "$rundir/task.raw"
+  raw="$(cat "$rundir/task.raw" 2>/dev/null || true)"
+  if [ -z "$raw" ]; then
+    echo "worker: no trusted /dsh comment found on $repo #$num — replying and closing the item"
+    printf '**dsh agent** — no trusted `/dsh` comment found on this thread (the trigger comment must come from an OWNER/MEMBER/COLLABORATOR and start with `/dsh` or `@dsh-agent`).' \
+      > "$rundir/nothing-to-do.md"
+    gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/nothing-to-do.md" >/dev/null 2>&1 || true
+    gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true
+    rm -rf "$rundir"
+    return 0
+  fi
+  TASK="${raw#/dsh }"
+  TASK="${TASK#@dsh-agent }"
+  TASK="${TASK#@dsh-agent: }"
+  TASK="$(printf '%s' "$TASK" | sed -E 's/^--(big|mac|linux)([[:space:]]+|$)//' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [ -z "$TASK" ]; then
+    echo "worker: empty task after stripping the trigger (bare /dsh) — replying and closing the item"
+    printf '**dsh agent** — the trigger comment had no task text after the `/dsh` prefix; nothing to do.' \
+      > "$rundir/empty-task.md"
+    gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/empty-task.md" >/dev/null 2>&1 || true
+    gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true
+    rm -rf "$rundir"
+    return 0
+  fi
+  THREAD_CONTEXT="$(cat "$rundir/ctx/thread-context.txt" 2>/dev/null || true)"
+  ACK_ID="$(ack_comment "$repo" "$num")"
+  [ "$ACK_ID" = "0" ] && ACK_ID=""
+
+  # --- checkout the target ref (PR merge ref for PR comments) -------------
+  {
+    git_clone "$repo" "$work"
+    if [ "$kind" = "pr" ]; then
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
+        GIT_CONFIG_VALUE_0="Authorization: token ${GH_TOKEN}" \
+        git -C "$work" fetch -q --depth 1 origin "refs/pull/${num}/merge"
+      git -C "$work" checkout -q FETCH_HEAD
+    fi
+  } || { echo "worker: checkout failed on $repo (token scope?) — aborting item" >&2; gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true; rm -rf "$rundir"; return 1; }
+
+  # --- push credential into the clone (same resolver the CI flow uses) ----
+  ( cd "$work" && PUSH_FALLBACK_CRED="$GH_TOKEN" DOPPLER_SERVICE_TOKEN="${DOPPLER_SERVICE_TOKEN:-}" \
+      bash "$DSH_BOT_DIR/scripts/resolve-push-token.sh" ) \
+    || { echo "worker: push-credential write failed — aborting item" >&2; gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true; rm -rf "$rundir"; return 1; }
+
+  # --- before-state for the shipper ----------------------------------------
+  git -C "$work" rev-parse HEAD > "$rundir/dsh-before-sha"
+  git -C "$work" ls-remote origin 'refs/heads/dsh/*' 2>/dev/null | awk '{print $2}' \
+    | sed 's|refs/heads/||' | sort > "$rundir/dsh-before-dsh-branches" || true
+  gh pr list --repo "$repo" --state open --limit 100 --json number --jq '.[].number' \
+    | sort -n > "$rundir/dsh-before-open-prs" || true
+
+  # --- run the agent (driver unchanged; comment-bot mode via REPLY_TARGET)-
+  TIMEOUT_ARGS=()
+  if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_ARGS=(timeout --signal=TERM --kill-after=60 "${DSH_WORKER_TIMEOUT_MIN:-120}m")
+  else
+    echo "worker: GNU timeout unavailable — running without a hard per-task cap (set DSH_WORKER_TIMEOUT_MIN + provision the box)" >&2
+  fi
+  rc=0
+  ( cd "$work" && export THREAD_CONTEXT REPLY_TARGET="$kind #$num" DSH_MODEL="$MODEL" DSH_BOT_DIR="$DSH_BOT_DIR" DSH_RUNNER_NAME="$WORKER_NAME" \
+      "${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$TASK" ) \
+    | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" | tee "$rundir/agent-output.txt" >/dev/null
+  rc=$?   # pipefail → the driver's rc (timeout 124 included)
+  echo "worker: agent exited $rc (non-zero is the agent/task failing, not the worker)"
+
+  # --- ship (deterministic; shared script) ---------------------------------
+  ( cd "$work" && ACK_COMMENT_ID="$ACK_ID" DSH_SHIP_REPO="$repo" DSH_RUN_ID="$runid" DSH_RUN_ATTEMPT=1 \
+      DSH_WORKTREE="$work" DSH_SHIP_CACHE="$rundir" DSH_AGENT_OUTPUT="$rundir/agent-output.txt" \
+      DSH_SHIP_NOTE_FILE="$rundir/ship-note.txt" DSH_PR_NUM_FILE="$rundir/pr-num" REVIEW_WORKFLOW="" \
+      DSH_TASK_TITLE="${TASK%%$'\n'*}" bash "$DSH_BOT_DIR/scripts/ship-changes.sh" ) \
+    || echo "worker: shipper exited nonzero (see log — ship note may be incomplete)" >&2
+
+  # --- reply (edits the trigger's ack comment in place when found) ---------
+  DSH_SHIP_CACHE="$rundir" DSH_AGENT_OUTPUT="$rundir/agent-output.txt" ACK_COMMENT_ID="$ACK_ID" \
+    TARGET_KIND="$kind" TARGET_NUM="$num" DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
+    bash "$DSH_BOT_DIR/scripts/post-reply.sh" || echo "worker: reply step failed" >&2
+
+  # --- adversarial review of what shipped (inline, on the worker) ----------
+  if [ -s "$rundir/pr-num" ]; then
+    PR_NUM="$(cat "$rundir/pr-num")"
+    echo "worker: reviewing shipped PR #$PR_NUM (model $REVIEW_MODEL)"
+    DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$REVIEW_MODEL" \
+      DSH_REVIEW_RULES_FILE="$REVIEW_RULES_FILE" DSH_WORKTREE="$work" PR_NUM="$PR_NUM" \
+      DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
+      bash "$DSH_BOT_DIR/scripts/review-pr.sh" \
+      || echo "worker: review stage exited nonzero (see log; verdicts never auto-approve)" >&2
+  else
+    echo "worker: nothing shipped — no review stage"
+  fi
+
+  # --- close the item: running → (queued stays if a newer trigger re-added)
+  gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true
+  echo "==== worker [$runid] $repo #$num complete ===="
+  prune_runs
+}
+
+sweep() {
+  local repo line num is_pr
+  for repo in $REPOS; do
+    ensure_labels "$repo"
+    echo "worker: polling $repo for label '$QUEUE_LABEL'"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      num="$(printf '%s' "$line" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).number?.toString() ?? "")')"
+      is_pr="$(printf '%s' "$line" | node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0,"utf8")).is_pr))')"
+      [ -n "$num" ] || continue
+      process_item "$repo" "$num" "$is_pr" || echo "worker: $repo #$num failed (see above)" >&2
+    done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${QUEUE_LABEL}&per_page=100" \
+      --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' 2>/dev/null || true)
+  done
+}
+
+case "$MODE" in
+  --once)
+    sweep
+    ;;
+  --loop)
+    echo "dsh-worker: loop mode — sweeping every ${TICK_S}s (PID $$, data root $DATA)"
+    while true; do
+      sweep
+      sleep "$TICK_S"
+    done
+    ;;
+  *)
+    echo "usage: dsh-worker.sh [--once|--loop]  (see header comments for env contract)" >&2
+    exit 2
+    ;;
+esac

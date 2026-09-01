@@ -26,6 +26,28 @@ Review rules for dsh-bot, applied by the dsh review stage (and any human).
 - Secrets never appear in logs, comments, PR text, or workflow echoes.
   Env names must avoid KEY/PASSWORD/SECRET/TOKEN patterns in agent-visible
   contexts.
+- Credentials never ride argv anywhere: a token passed as a git `-c`
+  value, a curl `-H` header, or any command-line argument is rejected —
+  argv is ps-readable to same-user processes on shared boxes. Env-based
+  git config (`GIT_CONFIG_COUNT`), header-file curl config, and
+  `.git/config` extraheaders are the sanctioned seams (this rule was
+  earned on the resolve-push-token review rounds).
+
+## Decoupled worker
+
+- The worker scripts (`dsh-worker.sh`, `ship-changes.sh`, `post-reply.sh`,
+  `review-pr.sh`) are shared with the CI flow where behavior overlaps; a
+  change to one mode that silently drifts the other is a defect. Their env
+  contracts must keep the DSH_*/GITHUB_* fallback shape so both callers
+  work.
+- Queue labels are NOT a trust mechanism: `dsh/queued` must only ever be
+  acted on after the worker re-derives the trigger's trust from the
+  comments API. A worker change that trusts the label alone is rejected.
+- The worker review must never auto-approve: verdicts are label actions
+  ONLY from `review-verdict.mjs`'s line-strict parse; an absent or
+  unparseable verdict sets NO labels and must surface for a human. The
+  rules contract is read from the PR's BASE ref — a PR must not be able to
+  edit the REVIEW.md that grades it.
 
 ## Workflow discipline
 
