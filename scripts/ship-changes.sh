@@ -78,7 +78,7 @@ command -v gh >/dev/null 2>&1 \
 # Progress edit: agent phase over, shipping.
 if [ -n "${ACK_COMMENT_ID:-}" ] && command -v gh >/dev/null 2>&1; then
   gh api "repos/${DSH_SHIP_REPO}/issues/comments/${ACK_COMMENT_ID}" -X PATCH \
-    -f body="**dsh agent (GLM-5.3)** — run: ${DSH_RUN_ID} — lane: ${DSH_RUNNER_NAME:-unknown}
+    -f body="**dsh agent** — run: ${DSH_RUN_ID} — lane: ${DSH_RUNNER_NAME:-unknown}${DSH_STAMP:+ — ${DSH_STAMP}}
 
   :package: Agent finished — shipping any changes." >/dev/null 2>&1 || true
 fi

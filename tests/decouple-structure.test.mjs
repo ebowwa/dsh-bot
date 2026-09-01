@@ -288,3 +288,8 @@ test("model + harness stamped on every surface (driver meta file)", () => {
   const rp = read("scripts/review-pr.sh");
   assert.match(rp, /harness: dsh-/);           // review header
 });
+
+test("no hardcoded model label on ANY produced surface (the ack-progress edit included)", () => {
+  const ship = read("scripts/ship-changes.sh");
+  assert.ok(!ship.includes("dsh agent (GLM-5.3)"), "the shipper's ack edit must stamp, not hardcode");
+});
