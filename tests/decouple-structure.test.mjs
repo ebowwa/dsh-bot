@@ -162,3 +162,30 @@ test("review queue: consumer example enqueues the decoupled review", () => {
   assert.match(ex, /agent-review-thin\.yml/);
   assert.ok(!ex.includes("agent-review.yml@"), "example must not point at the runner-holding review");
 });
+
+test("drift v1.46.0 findings: pin, failure notes, review cap — all fixed", () => {
+  // F1: dsh-review.yml must not pin @main (self-drift); @v1 is the
+  // documented moving major (drift-check advances it on TAG verdicts).
+  const shell = read(".github/workflows/dsh-review.yml");
+  assert.ok(!shell.includes("agent-review-thin.yml@main"), "unpinned @main ref is self-drift");
+  assert.match(shell, /agent-review-thin\.yml@v1\b/);
+
+  const w = read("scripts/dsh-worker.sh");
+  // F2: a mid-review failure (timeout/crash) posts a thread note; the
+  // label is NOT re-added (systemic failures must not loop the worker).
+  assert.match(w, /worker review of this PR failed before producing a verdict/);
+  const failNoteIdx = w.indexOf("worker review of this PR failed");
+  const requeueAfterFail = w.slice(failNoteIdx, failNoteIdx + 900).includes('f labels[]="$REVIEW_LABEL"');
+  assert.ok(!requeueAfterFail, "the mid-review failure path must NOT re-queue the label");
+  // ...and NEITHER failure path auto-requeues: an unconditional re-queue
+  // on a persistently failing clone posts one comment per sweep forever
+  // (self-caught during this PR's own review) — humans re-fire /review.
+  const cloneFailIdx = w.indexOf("could not clone the repo for this review");
+  assert.ok(cloneFailIdx !== -1, "clone failure posts a thread note");
+  assert.ok(!w.slice(cloneFailIdx, cloneFailIdx + 900).includes('f labels[]="$REVIEW_LABEL"'),
+    "the clone-failure path must NOT re-queue (comment-spam loop)");
+  // F3 + INFO 4: the header documents the review label + a separate
+  // review cap with the legacy 45m default.
+  assert.match(w, /DSH_WORKER_REVIEW_LABEL\s+review-queue label/);
+  assert.match(w, /\$\{DSH_WORKER_REVIEW_TIMEOUT_MIN:-45\}m/);
+});
