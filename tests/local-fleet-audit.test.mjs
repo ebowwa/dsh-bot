@@ -30,7 +30,8 @@ const fixture = (plant = true) => {
     mkdirSync(path.join(home, "Library", "LaunchAgents"), { recursive: true });
     writeFileSync(path.join(home, "Library", "LaunchAgents", "sh.dsh.node.air-linux.plist"), "x");
   }
-  // stub launchctl: reports a dsh participant when planted
+  // stub launchctl + ps: report dsh participants when planted (the plant
+  // must be observable on EVERY plane the audit checks)
   writeFileSync(path.join(shim, "launchctl"), `#!/usr/bin/env bash
 if [ "$1" = "list" ]; then
   ${plant ? 'echo "999\t0\tcom.dsh.rogue"' : ""}
@@ -38,7 +39,12 @@ if [ "$1" = "list" ]; then
 fi
 exit 0
 `);
+  writeFileSync(path.join(shim, "ps"), `#!/usr/bin/env bash
+${plant ? 'echo "user 999 0.0 0.0 /usr/local/bin/dsh-node --lane linux"' : 'echo "user 1 0.0 0.0 /sbin/launchd"'}
+exit 0
+`);
   spawnSync("chmod", ["+x", path.join(shim, "launchctl")]);
+  spawnSync("chmod", ["+x", path.join(shim, "ps")]);
   return { dir, home,
     env: { ...process.env, HOME: home, PATH: `${shim}${path.delimiter}${process.env.PATH}` } };
 };
