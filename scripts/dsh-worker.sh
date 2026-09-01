@@ -347,11 +347,16 @@ task_item() {
   else
     echo "worker: GNU timeout unavailable — task runs without a hard cap (provision the box)" >&2
   fi
+  # The export MUST terminate before the command (the && is load-bearing):
+  # a backslash continuation made "bash <driver> <task>" ARGUMENTS OF
+  # EXPORT — the driver never ran at all (live on the box: instant empty
+  # reply). `|| rc=$?` (not bare rc=$?): the sweep calls task_item in an
+  # || context, which suppresses set -e inside the function — a failing
+  # pipeline must be captured, never flow into the reply step.
   rc=0
   ( cd "$work" && export DSH_MODEL="$ITEM_MODEL" DSH_SUBAGENT_MODEL="${t_sub:-}" REPLY_TARGET="" DSH_BOT_DIR="$DSH_BOT_DIR" DSH_RUNNER_NAME="$WORKER_NAME" \
-      "${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$task" ) \
-    | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" | tee "$rundir/agent-output.txt" >/dev/null
-  rc=$?
+      && "${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$task" ) \
+    | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" | tee "$rundir/agent-output.txt" >/dev/null || rc=$?
   echo "worker: task agent exited $rc"
 
   # reply on the task issue and close it (the answer is the record)
@@ -448,10 +453,13 @@ process_item() {
   fi
   rc=0
   ITEM_MODEL="$(model_for "$repo")"
+  # Same two rules as task_item: the export terminates with && (never a
+  # backslash continuation into the command — that made the driver an
+  # argument of export), and the pipeline's rc is captured with || rc=$?
+  # (the || call context suppresses set -e inside this function).
   ( cd "$work" && export THREAD_CONTEXT REPLY_TARGET="$kind #$num" DSH_MODEL="$ITEM_MODEL" DSH_BOT_DIR="$DSH_BOT_DIR" DSH_RUNNER_NAME="$WORKER_NAME" \
-      "${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$TASK" ) \
-    | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" | tee "$rundir/agent-output.txt" >/dev/null
-  rc=$?   # pipefail → the driver's rc (timeout 124 included)
+      && "${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$TASK" ) \
+    | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" | tee "$rundir/agent-output.txt" >/dev/null || rc=$?
   echo "worker: agent exited $rc (non-zero is the agent/task failing, not the worker)"
 
   # --- ship (deterministic; shared script) ---------------------------------
