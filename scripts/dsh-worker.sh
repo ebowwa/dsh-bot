@@ -60,6 +60,11 @@
 #                       warns once and runs without a hard cap
 #   DSH_WORKER_REVIEW_TIMEOUT_MIN  per-REVIEW cap (default 45, the legacy
 #                       agent-review workflow timeout) — same enforcement
+#   DSH_WORKER_CONCURRENCY  how many items may run CONCURRENTLY (default
+#                       3). Items are independent agent runs; the label
+#                       claim is atomic (one DELETE winner), so parallel
+#                       items are safe by construction. 1 = the old
+#                       strictly-sequential behavior.
 #   DSH_WORKER_KEEP_RUNS    how many run dirs to keep (default 10)
 #   DSH_WORKER_TICK_S       loop sleep seconds (default 60)
 #
@@ -110,6 +115,22 @@ model_for() {
 REVIEW_MODEL="${DSH_WORKER_REVIEW_MODEL:-$MODEL}"
 REVIEW_RULES_FILE="${DSH_WORKER_REVIEW_RULES_FILE:-REVIEW.md}"
 KEEP_RUNS="${DSH_WORKER_KEEP_RUNS:-10}"
+CONCURRENCY="${DSH_WORKER_CONCURRENCY:-3}"
+ITEM_SLOTS="$DATA/items"
+mkdir -p "$ITEM_SLOTS" 2>/dev/null || true
+
+# slot_free <kind>-<num> — per-item lock + a bounded-slot check. Prints
+# the lock path when a slot is taken, nothing when the bound is hit or
+# the item is already running.
+slot_take() {
+  local key="$1" active lock
+  lock="$ITEM_SLOTS/$key.lock"
+  [ -e "$lock" ] && return 1            # this item is already running
+  active="$(ls -1 "$ITEM_SLOTS" 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$active" -ge "$CONCURRENCY" ] && return 1
+  : > "$lock" 2>/dev/null || return 1
+  printf '%s' "$lock"
+}
 WORKER_NAME="worker-$(hostname -s 2>/dev/null || echo unknown)"
 export DSH_SCRUB_EXTRA_HOSTS="${EXTRA_SCRUB_HOSTS:-}"
 
@@ -209,6 +230,24 @@ ack_comment() {
   local repo="$1" num="$2"
   gh api "repos/${repo}/issues/${num}/comments?per_page=100" \
     --jq "[.[] | select((.body // \"\") | contains(\"${ACK_MARKER}\")) | .id][-1] // 0" 2>/dev/null || echo 0
+}
+
+# run_item_bg <slot-key> <func> [args...] — claim a concurrency slot and
+# run the item in a background subshell (env-isolated: the item sets its
+# own TMPDIR/DSH_HOME inside). The label claim inside the item stays the
+# atomic serializer; the slot only bounds how many agents share the box.
+# Slot-full is a SKIP, not a failure: the label stays, the next sweep
+# retries.
+run_item_bg() {
+  local key="$1"; shift
+  local lock
+  lock="$(slot_take "$key")" || { echo "worker: slots full (or $key running) — leaving #$* for the next sweep" >&2; return 0; }
+  echo "worker: slot taken ($key); launching in background"
+  local ITEM_LOCK="$lock"
+  (
+    trap 'rm -f "$ITEM_LOCK"' EXIT
+    "$@"
+  ) &
 }
 
 # prune_runs — keep the newest KEEP_RUNS run dirs
@@ -533,7 +572,7 @@ sweep() {
       num="$(printf '%s' "$line" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).number?.toString() ?? "")')"
       is_pr="$(printf '%s' "$line" | node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0,"utf8")).is_pr))')"
       [ -n "$num" ] || continue
-      process_item "$repo" "$num" "$is_pr" || echo "worker: $repo #$num failed (see above)" >&2
+      run_item_bg "w-$repo-$num" process_item "$repo" "$num" "$is_pr"
     done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${QUEUE_LABEL}&per_page=100" \
       --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' \
       || echo "worker: poll FAILED for $repo label '$QUEUE_LABEL' (gh error above, if any)" >&2)
@@ -546,7 +585,7 @@ sweep() {
       is_pr="$(printf '%s' "$line" | node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0,"utf8")).is_pr))')"
       [ -n "$num" ] || continue
       if [ "$is_pr" = "true" ]; then
-        review_item "$repo" "$num" || echo "worker: review $repo #$num failed (see above)" >&2
+        run_item_bg "r-$repo-$num" review_item "$repo" "$num"
       else
         echo "worker: dsh/review on $repo #$num is not a PR — dropping the label (reviews are PR-only)"
         gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$REVIEW_LABEL")" >/dev/null 2>&1 || true
@@ -566,7 +605,7 @@ sweep() {
         echo "worker: dsh/task on $repo #$num is a PR — dropping the label (tasks are issue-only)"
         gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$TASK_LABEL")" >/dev/null 2>&1 || true
       else
-        task_item "$repo" "$num" || echo "worker: task $repo #$num failed (see above)" >&2
+        run_item_bg "t-$repo-$num" task_item "$repo" "$num"
       fi
     done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${TASK_LABEL}&per_page=100" \
       --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' \
