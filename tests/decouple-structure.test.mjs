@@ -252,18 +252,13 @@ test("task queue: the thin dispatch trigger exists with the legacy input surface
 
 test("driver invocations terminate their export with && (the continuation bug, live on the box)", () => {
   const w = read("scripts/dsh-worker.sh");
-  // BOTH item pipelines: the export line must END before the command —
-  // a backslash continuation made the driver an argument of export (the
-  // agent never ran; instant empty reply, twice live)
-  const invocations = [...w.matchAll(/export [^\n]*DSSH?_RUNNER_NAME="\$WORKER_NAME" \n\s*(.+)/g)].map((m) => m[1]);
-  const count = (w.match(/RUNNER_NAME="\$WORKER_NAME" \/g) || []).length;
+  const count = (w.match(/RUNNER_NAME="\$WORKER_NAME" \\/g) || []).length;
   assert.ok(count >= 2, "both pipelines present (" + count + ")");
   for (const line of w.split("\n")) {
     if (line.includes('"${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash')) {
       assert.match(line, /^\s*&& /, "the driver command must open with && (never be export arguments): " + line.trim());
     }
   }
-  // rc capture is suppression-safe (|| call context disables set -e)
-  assert.ok((w.match(/\| tee "\$rundir\/agent-output\.txt" >\/dev\/null \|\| rc=\$\?/g) || []).length >= 2,
-    "both pipelines capture rc with || rc=$?");
+  const rcCaptures = (w.match(/agent-output\.txt" >\/dev\/null \|\| rc=\$\?/g) || []).length;
+  assert.ok(rcCaptures >= 2, "both pipelines capture rc with || rc=$? (got " + rcCaptures + ")");
 });
