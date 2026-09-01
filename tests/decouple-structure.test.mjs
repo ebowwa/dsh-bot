@@ -203,5 +203,5 @@ test("live fixes (seed-dshbot): Basic-auth git header, $(cat) note bodies, brack
   const inst = read("scripts/install-worker.sh");
   assert.match(inst, /'\[d\]sh-worker\.sh --once'/);
   // upgrade path: a previously installed self-matching line gets REPLACED
-  assert.match(inst, /replacing the pre-fix \(self-matching\) keepalive/);
+  assert.match(inst, /canonical line enforced/);
 });

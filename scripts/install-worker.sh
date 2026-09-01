@@ -50,7 +50,7 @@ if [ ! -d "$DSH_BOT_DIR/.git" ]; then
   git clone https://github.com/ebowwa/dsh-bot.git "$DSH_BOT_DIR" \
     || { echo "install-worker: toolkit clone failed (egress?)" >&2; exit 3; }
 fi
-if git -c safe.directory="$DSH_BOT_DIR" -C "$DSH_BOT_DIR" fetch --tags \
+if git -c safe.directory="$DSH_BOT_DIR" -C "$DSH_BOT_DIR" fetch --tags --force \
    && git -c safe.directory="$DSH_BOT_DIR" -C "$DSH_BOT_DIR" checkout v1; then
   PIN_OK=1
   echo "install-worker: toolkit pinned at $(git -c safe.directory="$DSH_BOT_DIR" -C "$DSH_BOT_DIR" describe --tags 2>/dev/null || echo v1)"
@@ -81,19 +81,20 @@ touch "$WORKER_HOME/worker.log" 2>/dev/null || true
 # shell — the guard then always "finds" a worker and the sweep NEVER runs
 # (proven live on seed-dshbot: cron fired for 14 minutes, worker.log stayed
 # empty). [d]sh-worker matches the real script but not its own literal.
-LINE="* * * * * pgrep -f '[d]sh-worker.sh --once' >/dev/null 2>&1 || { git -C ${DSH_BOT_DIR} fetch --tags -q && git -C ${DSH_BOT_DIR} checkout -q v1 || true; set -a; . ${WORKER_HOME}/env; set +a; ${DSH_BOT_DIR}/scripts/dsh-worker.sh --once >> ${WORKER_HOME}/worker.log 2>&1; }"
-# upgrade-aware idempotence: drop ANY existing dsh-worker line (the first
-# shipped one self-matched and never fired) and install the fixed line.
-if crontab -l 2>/dev/null | grep -F "dsh-worker.sh --once" | grep -vF "[d]sh-worker.sh --once" >/dev/null 2>&1; then
-  echo "install-worker: replacing the pre-fix (self-matching) keepalive line"
-  crontab -l 2>/dev/null | grep -vF "dsh-worker.sh --once" | crontab -
+LINE="* * * * * pgrep -f '[d]sh-worker.sh --once' >/dev/null 2>&1 || { git -C ${DSH_BOT_DIR} fetch --tags --force -q && git -C ${DSH_BOT_DIR} checkout -q v1 || true; set -a; . ${WORKER_HOME}/env; set +a; ${DSH_BOT_DIR}/scripts/dsh-worker.sh --once >> ${WORKER_HOME}/worker.log 2>&1; }"
+# The canonical-line rule: ALWAYS drop any existing dsh-worker line and
+# install the current one. Append-only idempotence ships upgrades never
+# (the box keeps its first, buggier line forever); rewrite-always is the
+# upgrade path (two shipped lines already needed replacing: the
+# self-matching pgrep, the tag-clobbering fetch).
+if crontab -l 2>/dev/null | grep -F "dsh-worker.sh --once" >/dev/null 2>&1; then
+  # grep -v exits 1 when the line was the ONLY crontab entry — expected,
+  # not a failure (|| true on the GREP, never on the crontab write)
+  { crontab -l 2>/dev/null | grep -vF "dsh-worker.sh --once" || true; } | crontab -
+  echo "install-worker: previous keepalive line removed (canonical line enforced)"
 fi
-if crontab -l 2>/dev/null | grep -F "[d]sh-worker.sh --once" >/dev/null; then
-  echo "install-worker: cron keepalive already present — left untouched"
-else
-  (crontab -l 2>/dev/null; echo "$LINE") | crontab - \
-    || { echo "install-worker: crontab install failed" >&2; exit 3; }
-fi
+(crontab -l 2>/dev/null; echo "$LINE") | crontab - \
+  || { echo "install-worker: crontab install failed" >&2; exit 3; }
 
 echo "install-worker: OK"
 echo "  toolkit : $DSH_BOT_DIR (pinned to the moving v1 tag per sweep)"

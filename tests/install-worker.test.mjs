@@ -78,6 +78,7 @@ test("installs the env file 0600 with the values; cron line has NO credential", 
     assert.match(cron, /pgrep -f '\[d\]sh-worker\.sh --once'/, "pgrep-guarded with the [d] bracket trick");
     assert.ok(!cron.includes("pgrep -f 'dsh-worker.sh --once'"), "plain self-matching pattern must not ship");
     assert.match(cron, /checkout -q v1/, "re-pins to the moving v1 tag each sweep");
+    assert.match(cron, /fetch --tags --force/, "force-moves the moving tag (plain fetch clobbers: \"would clobber existing tag\")");
     assert.ok(!cron.includes(GH_CRED), "NO credential in the cron line");
     assert.ok(!cron.includes(DOPPLER_CRED), "NO doppler credential in the cron line");
     // the installer's own output never echoes the values either
@@ -94,7 +95,7 @@ test("idempotent: a second run does not duplicate the cron line", () => {
     const first = readFileSync(f.store, "utf8");
     const res = spawnSync("bash", [INSTALLER], { encoding: "utf8", env: f.env() });
     assert.equal(res.status, 0, res.stderr);
-    assert.match(res.stdout, /already present/, "second run reports the existing cron");
+    assert.match(res.stdout, /canonical line enforced/, "second run re-enforces the canonical line");
     const second = readFileSync(f.store, "utf8");
     assert.equal(second, first, "crontab unchanged by the second run");
   } finally {
