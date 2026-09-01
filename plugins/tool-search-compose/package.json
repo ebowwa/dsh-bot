@@ -1,0 +1,9 @@
+{
+  "name": "@dsh-bot/tool-search-compose",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dsh composition search tool — counts, file-lists, case-folding, context, total result caps, path/mtime ordering over ripgrep in one call",
+  "type": "module",
+  "main": "lib/index.js",
+  "license": "MIT"
+}
