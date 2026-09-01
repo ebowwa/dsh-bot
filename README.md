@@ -26,6 +26,7 @@ Two execution modes:
 | `.github/workflows/agent-comment.yml` | LEGACY comment loop: context fetch → scrub → agent → ship → reply → review dispatch |
 | `.github/workflows/agent-review.yml` | LEGACY adversarial review stage (rules + gates + verdict + labels) |
 | `.github/workflows/agent-dispatch.yml` | LEGACY manual/scheduled task entry |
+| `.github/workflows/drift-check.yml` | self-reviewing release agent: reviews its own main-branch diff, tags + releases only on an approved verdict (TAG / TAG-WITH-FINDINGS), advances the moving `@v1` pin, then notifies `DSH_BOT_CONSUMERS` (repo variable: comma/space-separated `owner/repo` list) via `repository_dispatch` — each consumer opens its own bump PR |
 | `scripts/dsh-worker.sh` | the out-of-band worker: poll → claim (label) → run driver → ship → reply → review (see docs/decoupled-worker.md) |
 | `scripts/ship-changes.sh` | deterministic shipper, shared by the legacy workflow AND the worker (never trust the model to push) |
 | `scripts/post-reply.sh` | thread reply (ack-comment edit or fresh comment), shared by both modes |
@@ -37,10 +38,12 @@ Two execution modes:
 | `scripts/dsh-progress.mjs` | live JSON trace of reasoning/tool events |
 | `scripts/workflow-lint.mjs` | structural workflow-YAML lint (block-indent consistency; gates runs it — run 32705244305 regression) |
 | `scripts/tests-lint.mjs` | structural test-source lint: rejects PATH assignments that hard-code system dirs without the ambient PATH — they cannot construct a lane-installed CLI's absence (run 32933615526 regression; the corpus test rides `node --test`) |
+| `scripts/drift-verdict.mjs` | line-strict verdict extraction for drift-check (TAG / TAG-WITH-FINDINGS / BLOCK; fail-closed on absence) + scrubbed review-body surfacing to the run log |
+| `scripts/resolve-push-token.sh` | Doppler-first git push credential for agent jobs, shared by the legacy workflows and the worker (the checkout's ephemeral token cannot push workflows) |
 | `config/settings.zai.yaml` | DSH settings template (zai provider, glm-5.3) |
 | `config/dsh-worker.env.example` | worker env template (GH_TOKEN, DSH_WORKER_REPOS; chmod 600) |
+| `config/models.yaml` | model catalog for consumers — the provider/model ids the Z.AI coding endpoint serves (what `DSH_MODEL` / `DSH_WORKER_MODEL` accept) |
 | `docs/decoupled-worker.md` | full decoupled-mode guide: queue semantics, trust model, security posture, factory-box install |
-| `consumers.txt` | repos receiving drift bump-PRs |
 
 ## Adopting (consumer repo)
 
