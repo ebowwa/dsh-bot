@@ -39,6 +39,7 @@ ubuntu-latest** and only acks + enqueues. No self-hosted `dsh` runners, no
 | `dsh/queued` | added by the trigger; pending |
 | `dsh/running` | claimed — the worker DELETE-removed `queued` (a second worker racing the same item gets a 404 on the DELETE and skips it) |
 | `dsh/review` | a REVIEW-ONLY item — added by `agent-review-thin.yml` (a `/review` comment or `workflow_dispatch`); the worker claims it the same way and runs `review-pr.sh` on that PR. **The decoupled review stage: reviews of ANY PR run on the worker — no Actions job holds a runner for a review, ever.** |
+| `dsh/task` | a DISPATCHED TASK — `agent-dispatch-thin.yml` (manual `workflow_dispatch` or a consumer's `schedule`) creates an issue whose body carries the task plus options (model, subagent model, base ref) in a `<!-- dsh:task -->` marker block; the worker claims the label and runs the agent with dispatch semantics (the agent pushes/opens PRs itself; the answer is posted on the task issue, which is closed). **Retires the legacy runner-holding `agent-dispatch.yml` path.** The marker is required: a user-labeled issue is not a task. |
 | (removed at completion) | `running` is removed; a fresher `queued` from a newer trigger comment stays queued for the next sweep |
 
 The queue list is read with the issues REST API (`gh api repos/R/issues?labels=...`)

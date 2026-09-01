@@ -1,0 +1,119 @@
+# dsh-bot: agent-dispatch-thin — the DECOUPLED manual/scheduled task entry
+# as a REUSABLE workflow. The runner-holding path (agent-dispatch.yml on
+# [self-hosted, dsh] for up to 120 min per task) is retired for consumers
+# that adopt this: the trigger is a ~15s github-hosted job that CREATES A
+# TASK ISSUE carrying the task and its options (model, subagent model,
+# base ref) in a structured HTML-marker block, labels it dsh/task, and
+# exits. The out-of-band worker (scripts/dsh-worker.sh) claims the label
+# and runs the agent — no self-hosted runner is held anywhere.
+#
+# Input surface: IDENTICAL to legacy agent-dispatch.yml so programmatic
+# callers (the tower's executor sends task/model/subagent_model
+# conditionally; GitHub 422s unknown inputs) keep working unchanged.
+# Out-of-band semantics: task/base-ref/model/subagent-model ride the
+# queue payload; runner/timeout-minutes are accepted no-ops (no lane is
+# held; the worker's DSH_WORKER_TIMEOUT_MIN caps the run);
+# review-workflow/dsh-bot-ref are accepted no-ops (reviews are inline on
+# the worker).
+#
+# The queue payload (issue body), written by this trigger and parsed by
+# the worker:
+#   <!-- dsh:task
+#   model: provider/model            (may be empty)
+#   subagent-model: provider/model   (may be empty)
+#   base-ref: <ref or empty>         (empty = default branch)
+#   -->
+#   <task text>
+# The marker block is provenance (created by this privileged trigger),
+# and the worker requires it — a bare user-labeled issue is not a task.
+
+name: agent-dispatch-thin
+
+on:
+  workflow_call:
+    inputs:
+      task:
+        description: "Task text (empty = the maintenance default; the created issue carries it)"
+        type: string
+        default: ""
+      base-ref:
+        description: "Ref to start from (empty = default branch)"
+        type: string
+        default: ""
+      runner:
+        description: "Accepted for input compatibility; no-op out-of-band (no lane is held)"
+        type: string
+        default: "auto"
+      model:
+        description: "Model for this run: provider/model (empty = the worker's repo map / fleet default)"
+        type: string
+        default: ""
+      subagent-model:
+        description: "Model for subagent children (empty = inherit)"
+        type: string
+        default: ""
+      timeout-minutes:
+        description: "Accepted for input compatibility; the worker's DSH_WORKER_TIMEOUT_MIN caps the run"
+        type: number
+        default: 120
+      review-workflow:
+        description: "Accepted for input compatibility; reviews run inline on the worker"
+        type: string
+        default: ""
+      dsh-bot-ref:
+        description: "Accepted for input compatibility"
+        type: string
+        default: ""
+
+jobs:
+  dsh-dispatch-thin-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Lane impact: none — github-hosted; NO self-hosted runner is held
+      # for the task (that was the legacy agent-dispatch.yml path).
+      - name: Create the task issue (the whole trigger)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TASK_INPUT: ${{ inputs.task }}
+          BASE_REF: ${{ inputs.base-ref }}
+          MODEL_INPUT: ${{ inputs.model }}
+          SUBMODEL_INPUT: ${{ inputs.subagent-model }}
+          TASK_LABEL: dsh/task
+        run: |
+          set -euo pipefail
+
+          TASK="$TASK_INPUT"
+          if [ -z "$TASK" ]; then
+            # Same fallback text the legacy driver used for scheduled fires.
+            TASK="Routine maintenance task: check this repository for issues labeled agent-todo, pick the highest-priority one, and if the fix is clear, implement it, test it, and open a pull request. Otherwise report what you found."
+          fi
+
+          # charset guards: these values ride structured text the worker
+          # parses line-wise — a newline would inject sibling keys, so
+          # anything outside [A-Za-z0-9._/-] fails HERE, not downstream
+          for v in "$MODEL_INPUT" "$SUBMODEL_INPUT" "$BASE_REF"; do
+            case "$v" in
+              '') ;;
+              *[!A-Za-z0-9._/-]*)
+                echo "agent-dispatch-thin: invalid characters in model/subagent-model/base-ref — allowed [A-Za-z0-9._/-]" >&2
+                exit 2 ;;
+            esac
+          done
+
+          TITLE="dsh task: $(printf '%s' "$TASK" | head -n1 | cut -c1-60)"
+          {
+            printf '<!-- dsh:task\n'
+            printf 'model: %s\n' "$MODEL_INPUT"
+            printf 'subagent-model: %s\n' "$SUBMODEL_INPUT"
+            printf 'base-ref: %s\n' "$BASE_REF"
+            printf ' -->\n'
+            printf '%s\n' "$TASK"
+          } > /tmp/dsh-task-body.md
+
+          gh label create "$TASK_LABEL" --repo "$GITHUB_REPOSITORY" \
+            --force --color 1D76DB --description "dsh dispatched task (decoupled worker)" >/dev/null 2>&1 || true
+          URL="$(gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" --body-file /tmp/dsh-task-body.md --label "$TASK_LABEL")"
+          rm -f /tmp/dsh-task-body.md
+          echo "task queued: $URL — the worker claims the label; no runner is held"
