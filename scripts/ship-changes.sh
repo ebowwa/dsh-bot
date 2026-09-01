@@ -180,12 +180,17 @@ if [ -n "$DIRTY" ] || [ "${AHEAD:-0}" -gt 0 ] 2>/dev/null; then
   fi
 fi
 
-# The ship note only CLAIMS verified when the git checks truly ran;
-# otherwise it says so (fail-closed honesty, never a false "verified").
-if [ "${DIFF_OK:-1}" != "1" ]; then
+# The ship note: a REAL shipping NOTE always wins (the agent pushed /
+# PRs opened — never overwrite that with an UNVERIFIED message, review
+# round 2 on PR #50). When there is nothing real, only claim "verified"
+# if the git checks actually ran; a failing git yields UNVERIFIED.
+if [ -n "$NOTE" ]; then
+  echo "ship note: $NOTE"
+  echo "$NOTE" > "$DSH_SHIP_NOTE_FILE"
+elif [ "${DIFF_OK:-1}" != "1" ]; then
   echo "ship note: nothing to ship — git checks could not run (UNVERIFIED)"
   echo "nothing to ship — git checks could not run (UNVERIFIED)" > "$DSH_SHIP_NOTE_FILE"
 else
-  echo "ship note: ${NOTE:-nothing to ship (verified: no repo-state changes, no local diff)}"
-  echo "${NOTE:-nothing to ship (verified: no repo-state changes, no local diff)}" > "$DSH_SHIP_NOTE_FILE"
+  echo "ship note: nothing to ship (verified: no repo-state changes, no local diff)"
+  echo "nothing to ship (verified: no repo-state changes, no local diff)" > "$DSH_SHIP_NOTE_FILE"
 fi

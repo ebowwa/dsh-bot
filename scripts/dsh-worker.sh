@@ -30,8 +30,10 @@
 #   DSH_BOT_DIR         required — this toolkit's checkout (scripts/)
 #   DSH_WORKER_REPOS    required — space/comma-separated "owner/repo" list
 #                       of consumer repos to poll
-#   DOPPLER_SERVICE_TOKEN  optional — passed through to the driver and the
-#                       push-credential resolver (worker-side Doppler)
+#   DOPPLER_SERVICE_TOKEN  REQUIRED — the agent launches only via
+#                       `doppler run --token ...`; the driver exits 2
+#                       (typed) without it. Also used by the
+#                       push-credential resolver.
 #   DSH_WORKER_DATA_ROOT    run artifacts root (default $HOME/.dsh-worker)
 #   DSH_WORKER_MODEL        agent model (default zai/glm-5.3)
 #   DSH_WORKER_SUBAGENT_MODEL subagent children (default inherit head)
@@ -178,7 +180,10 @@ process_item() {
   runid="w$(date +%Y%m%d-%H%M%S)-$$"
   rundir="$DATA/runs/$runid"
   work="$rundir/repo"
-  mkdir -p "$rundir/tmp" "$work"
+  # ctx MUST exist before fetch_context redirects into it (review round 2 on
+  # PR #50: the F3 fix pointed the redirect at $rundir/ctx but nothing ever
+  # created the dir — still context-blind under || true).
+  mkdir -p "$rundir/tmp" "$rundir/ctx" "$work"
   export TMPDIR="$rundir/tmp"
   echo "==== worker [$runid] $repo #$num ($kind) ===="
 
@@ -258,9 +263,13 @@ process_item() {
   echo "worker: agent exited $rc (non-zero is the agent/task failing, not the worker)"
 
   # --- ship (deterministic; shared script) ---------------------------------
+  # DSH_SHIP_NOTE_FILE is deliberately NOT set: the default
+  # ($DSH_SHIP_CACHE/dsh-ship-note.txt) is exactly what post-reply.sh reads
+  # — a custom filename here silently dropped the Shipped note from the
+  # worker's reply (review round 2 on PR #50).
   ( cd "$work" && ACK_COMMENT_ID="$ACK_ID" DSH_SHIP_REPO="$repo" DSH_RUN_ID="$runid" DSH_RUN_ATTEMPT=1 \
       DSH_WORKTREE="$work" DSH_SHIP_CACHE="$rundir" DSH_AGENT_OUTPUT="$rundir/agent-output.txt" \
-      DSH_SHIP_NOTE_FILE="$rundir/ship-note.txt" DSH_PR_NUM_FILE="$rundir/pr-num" REVIEW_WORKFLOW="" \
+      DSH_PR_NUM_FILE="$rundir/pr-num" REVIEW_WORKFLOW="" \
       DSH_TASK_TITLE="${TASK%%$'\n'*}" bash "$DSH_BOT_DIR/scripts/ship-changes.sh" ) \
     || echo "worker: shipper exited nonzero (see log — ship note may be incomplete)" >&2
 
