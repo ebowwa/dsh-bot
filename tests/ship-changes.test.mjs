@@ -155,3 +155,27 @@ test("missing repo context fails loudly (never ships to an unknown repo)", () =>
     rmSync(f.dir, { recursive: true, force: true });
   }
 });
+
+test("unrunnable git tree → note says UNVERIFIED, never a false 'verified' (PR45 F5)", () => {
+  const f = fixture();
+  try {
+    // A worktree that is NOT a git repo: the before-state files exist, the
+    // shipper's own git checks fail — the note must not claim verification.
+    const notGit = path.join(f.dir, "not-a-repo");
+    mkdirSync(notGit, { recursive: true });
+    writeFileSync(path.join(f.cache, "dsh-before-sha"), "deadbeef");
+    writeFileSync(path.join(f.cache, "dsh-before-dsh-branches"), "");
+    writeFileSync(path.join(f.cache, "dsh-before-open-prs"), "");
+    writeFileSync(path.join(f.cache, "dsh-agent-output.txt"), "no output\n");
+
+    const res = spawnSync("bash", [SHIPPER], {
+      encoding: "utf8", env: f.env({ DSH_WORKTREE: notGit }),
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const note = readFileSync(path.join(f.cache, "ship-note.txt"), "utf8");
+    assert.match(note, /UNVERIFIED/);
+    assert.ok(!note.includes("verified:"), "a non-git tree must never claim verification");
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});

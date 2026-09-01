@@ -54,13 +54,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Nothing to do unless the comment is actually a /dsh trigger.
+          # Matcher CONSISTENCY (review round on PR #45): the consumer
+          # shell gates on startsWith('/dsh') || contains('@dsh-agent'),
+          # and the worker matches the same contains form. The trigger must
+          # too — a comment the gate accepts and the worker would accept
+          # must never be silently dropped here.
           COMMENT_BODY="$(node -e '
             const e = JSON.parse(require("fs").readFileSync(process.env.GITHUB_EVENT_PATH, "utf8"));
             process.stdout.write(e.comment?.body ?? "");
           ')"
           case "$COMMENT_BODY" in
-            /dsh*|@dsh-agent*) ;;
+            /dsh*|*@dsh-agent*) ;;
             *) echo "not a /dsh trigger; nothing to do"; exit 0 ;;
           esac
 

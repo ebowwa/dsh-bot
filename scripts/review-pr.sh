@@ -144,14 +144,21 @@ fi
 # 5. Verdict — line-strict, fail-closed on absence.
 VERDICT="$(node "$DSH_BOT_DIR/scripts/review-verdict.mjs" "$DSH_REVIEW_OUT" 2>/dev/null || true)"
 
-# 6. Post: scrubbed body as a PR comment, labels per verdict.
+# 6. Post: scrubbed body as a PR comment, labels per verdict. Fail-closed:
+#    the review comment is scrubbed output — a scrubber failure means the
+#    review is NOT posted and the script exits 3 (the header's exit-3
+#    contract, which the review round on PR #45 found to be dead code: the
+#    placeholder text was posted instead of failing).
 POST_BODY="$(mktemp)"
 {
   echo "**dsh review (worker)** — run: ${DSH_RUN_ID:-_} — model: ${DSH_REVIEW_MODEL}"
   echo
-  node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$DSH_REVIEW_OUT" 2>/dev/null \
-    || echo "_(review body withheld: scrubber unavailable)_"
 } > "$POST_BODY"
+if ! node "$DSH_BOT_DIR/scripts/scrub-output.mjs" < "$DSH_REVIEW_OUT" >> "$POST_BODY" 2>/dev/null; then
+  echo "review-pr: scrubber failed — review NOT posted (fail-closed, exit 3)" >&2
+  rm -f "$POST_BODY" "$RULES_TMP"
+  exit 3
+fi
 gh pr comment "$PR_NUM" --repo "$DSH_SHIP_REPO" --body-file "$POST_BODY" 2>/dev/null \
   || echo "review-pr: comment post failed (check PAT scope on $DSH_SHIP_REPO)" >&2
 rm -f "$POST_BODY"
