@@ -76,12 +76,16 @@ touch "$WORKER_HOME/worker.log" 2>/dev/null || true
 #    credentials are NOT in the line: it sources the 0600 env file.
 #    `checkout v1` failing degrades to running the previously pinned
 #    release (the fetch error lands in worker.log) — never a broken sweep.
-# The pgrep pattern uses the [d]-bracket trick: the wrapping sh -c carries
-# the literal pattern text in ITS cmdline, and a plain pattern matches that
-# shell — the guard then always "finds" a worker and the sweep NEVER runs
-# (proven live on seed-dshbot: cron fired for 14 minutes, worker.log stayed
-# empty). [d]sh-worker matches the real script but not its own literal.
-LINE="* * * * * pgrep -f '[d]sh-worker.sh --once' >/dev/null 2>&1 || { git -C ${DSH_BOT_DIR} fetch --tags --force -q && git -C ${DSH_BOT_DIR} checkout -q v1 || true; set -a; . ${WORKER_HOME}/env; set +a; ${DSH_BOT_DIR}/scripts/dsh-worker.sh --once >> ${WORKER_HOME}/worker.log 2>&1; }"
+# Overlap guard = flock, NOT pgrep. Every pgrep form self-matches here:
+# the carrier sh -c's cmdline contains the REAL script path in the sweep
+# braces, so the guard pattern always finds ITSELF (bracket tricks only
+# protect the pattern's own text — live-proven twice on seed-dshbot:
+# plain AND bracketed pgrep both never let a sweep run, worker.log empty
+# for 25+ minutes). flock -n is the canonical cron mutual exclusion: if a
+# sweep is running, this tick exits instantly; otherwise it runs.
+command -v flock >/dev/null 2>&1 \
+  || { echo "install-worker: flock (util-linux) required for the keepalive — provision the box" >&2; exit 3; }
+LINE="* * * * * flock -n ${WORKER_HOME}/sweep.lock /bin/bash -c 'git -C ${DSH_BOT_DIR} fetch --tags --force -q && git -C ${DSH_BOT_DIR} checkout -q v1 || true; set -a; . ${WORKER_HOME}/env; set +a; ${DSH_BOT_DIR}/scripts/dsh-worker.sh --once >> ${WORKER_HOME}/worker.log 2>&1'"
 # The canonical-line rule: ALWAYS drop any existing dsh-worker line and
 # install the current one. Append-only idempotence ships upgrades never
 # (the box keeps its first, buggier line forever); rewrite-always is the
