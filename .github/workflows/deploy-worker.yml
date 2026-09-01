@@ -76,6 +76,12 @@ jobs:
           ls -la "$HOME/.dsh-worker" 2>/dev/null || echo "(no worker home)"
           echo "--- worker.log (last 15 lines, if any) ---"
           tail -n 15 "$HOME/.dsh-worker/worker.log" 2>/dev/null | node scripts/scrub-output.mjs || echo "(no worker.log — no sweep has ever run)"
+          echo "--- LIVE dsh census (processes / run dirs / sweep lock) ---"
+          echo "dsh driver processes: $(pgrep -fc 'run-dsh-agent\.sh' || true)"
+          echo "dsh headless procs:   $(pgrep -fc 'dsh --profile headless' || true)"
+          echo "active run dirs:     $(ls -1 "$HOME/.dsh-worker/runs" 2>/dev/null | wc -l | tr -d ' ') (in-flight + unpruned recent)"
+          ls -1t "$HOME/.dsh-worker/runs" 2>/dev/null | head -5 | sed 's/^/    /'
+          echo "sweep lock held:     $(flock -n "$HOME/.dsh-worker/sweep.lock" true 2>/dev/null && echo no || echo YES — a sweep is executing)"
           echo "--- worker.log: the LAST task block, whole ---"
           awk '/==== worker \[t/{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$HOME/.dsh-worker/worker.log" 2>/dev/null | head -40 | node scripts/scrub-output.mjs || echo "(no task block yet)"
           echo "--- cron-eye repro: the poll EXACTLY as cron runs it ---"
