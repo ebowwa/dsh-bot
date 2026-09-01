@@ -149,3 +149,19 @@ else here.
   multiple boxes each running `--once` on the same repos share the queue
   safely via the claim DELETE. `--loop` is for single-processor service
   mode; when used, ensure only one loop per box (`pgrep` guard in cron).
+## The perimeter rule (local-plane audits)
+
+The air-native-linux incident (2026-08-31 → 09-01): a laptop LaunchAgent
+claimed tower lane tickets for ~30 hours while every cloud-side audit —
+Actions runs, queues, the factory box — showed nothing. The participant
+sat under the auditor's own shell the whole time. **Any occupancy audit
+includes the machine it runs on**: processes, service managers
+(launchd / systemd --user / cron), and dsh/node filesystem artifacts.
+
+`scripts/local-fleet-audit.sh` is that audit, report-only (always exit 0 —
+an audit that fails CI teaches people to stop running it). Run it on any
+machine that might be participating, laptops included — especially your
+own. A finding is a question ("is this sanctioned?"), not a verdict: the
+GUI harness (`com.dsh.web`) and a sanctioned worker install are findings
+you answer "yes" to; a quarantined plist or a foreign `dsh-node-*`
+directory is one you act on.
