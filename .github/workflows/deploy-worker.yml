@@ -72,6 +72,17 @@ jobs:
           echo "--- worker.log (last 15 lines, if any) ---"
           tail -n 15 "$HOME/.dsh-worker/worker.log" 2>/dev/null | node scripts/scrub-output.mjs || echo "(no worker.log — no sweep has ever run)"
 
+      - name: Refresh the box toolkit to the current v1 release
+        # The activation must test EXACTLY what steady-state runs: the
+        # cron line re-pins to v1 per sweep, but a just-installed (or
+        # long-idle) checkout may lag a release behind — the first
+        # activation ran a stale script and re-failed a fixed bug.
+        run: |
+          set -euo pipefail
+          git -C "$HOME/dsh-bot" fetch --tags -q
+          git -C "$HOME/dsh-bot" checkout -q v1
+          echo "toolkit pinned at: $(git -C "$HOME/dsh-bot" describe --tags)"
+
       - name: Activation sweep (one-time, in-job)
         if: ${{ inputs.activation-sweep }}
         run: |
