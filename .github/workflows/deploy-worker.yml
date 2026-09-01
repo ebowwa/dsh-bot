@@ -71,6 +71,11 @@ jobs:
           ls -la "$HOME/.dsh-worker" 2>/dev/null || echo "(no worker home)"
           echo "--- worker.log (last 15 lines, if any) ---"
           tail -n 15 "$HOME/.dsh-worker/worker.log" 2>/dev/null | node scripts/scrub-output.mjs || echo "(no worker.log — no sweep has ever run)"
+          echo "--- tool locations (cron PATH is /usr/bin:/bin) ---"
+          for t in git node gh flock doppler; do command -v "$t" || echo "$t: NOT FOUND on job PATH"; done
+          echo "--- systemctl --user (keepalive fallback probe) ---"
+          systemctl --user is-system-running 2>&1 || true
+          loginctl show-user "$USER" -p Linger 2>&1 || true
 
       - name: Activation sweep (one-time, in-job)
         if: ${{ inputs.activation-sweep }}
