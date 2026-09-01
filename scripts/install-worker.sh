@@ -66,8 +66,19 @@ touch "$WORKER_HOME/worker.log" 2>/dev/null || true
 #    credentials are NOT in the line: it sources the 0600 env file.
 #    `checkout v1` failing degrades to running the previously pinned
 #    release (the fetch error lands in worker.log) — never a broken sweep.
-LINE="* * * * * pgrep -f 'dsh-worker.sh --once' >/dev/null 2>&1 || { git -C ${DSH_BOT_DIR} fetch --tags -q && git -C ${DSH_BOT_DIR} checkout -q v1 || true; set -a; . ${WORKER_HOME}/env; set +a; ${DSH_BOT_DIR}/scripts/dsh-worker.sh --once >> ${WORKER_HOME}/worker.log 2>&1; }"
-if crontab -l 2>/dev/null | grep -F "dsh-worker.sh --once" >/dev/null; then
+# The pgrep pattern uses the [d]-bracket trick: the wrapping sh -c carries
+# the literal pattern text in ITS cmdline, and a plain pattern matches that
+# shell — the guard then always "finds" a worker and the sweep NEVER runs
+# (proven live on seed-dshbot: cron fired for 14 minutes, worker.log stayed
+# empty). [d]sh-worker matches the real script but not its own literal.
+LINE="* * * * * pgrep -f '[d]sh-worker.sh --once' >/dev/null 2>&1 || { git -C ${DSH_BOT_DIR} fetch --tags -q && git -C ${DSH_BOT_DIR} checkout -q v1 || true; set -a; . ${WORKER_HOME}/env; set +a; ${DSH_BOT_DIR}/scripts/dsh-worker.sh --once >> ${WORKER_HOME}/worker.log 2>&1; }"
+# upgrade-aware idempotence: drop ANY existing dsh-worker line (the first
+# shipped one self-matched and never fired) and install the fixed line.
+if crontab -l 2>/dev/null | grep -F "dsh-worker.sh --once" | grep -vF "[d]sh-worker.sh --once" >/dev/null 2>&1; then
+  echo "install-worker: replacing the pre-fix (self-matching) keepalive line"
+  crontab -l 2>/dev/null | grep -vF "dsh-worker.sh --once" | crontab -
+fi
+if crontab -l 2>/dev/null | grep -F "[d]sh-worker.sh --once" >/dev/null; then
   echo "install-worker: cron keepalive already present — left untouched"
 else
   (crontab -l 2>/dev/null; echo "$LINE") | crontab - \

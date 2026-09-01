@@ -107,11 +107,16 @@ ensure_labels() { # $1 = owner/repo
 
 # git auth via ENV-based config (GIT_CONFIG_COUNT): the value rides the
 # environment, never argv — argv is ps-readable to any same-user process.
-# The PAT charset (alnum + underscore) is safe inside the quoted value.
+# The header is BASIC auth (base64 x-access-token:TOKEN) — the GitHub-API
+# "Authorization: token" scheme 401s on git's http endpoint (proven live on
+# seed-dshbot: valid PAT, API calls green, clone 401). Same shape
+# resolve-push-token.sh writes. credential.helper is reset so a stale
+# helper on a shared box can't inject a dead credential either way.
+git_auth_header() { printf 'AUTHORIZATION: basic %s' "$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"; }
 git_clone() { # <owner/repo> <dest>
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
-    GIT_CONFIG_VALUE_0="Authorization: token ${GH_TOKEN}" \
-    git clone --quiet --depth 1 "https://github.com/${1}.git" "$2"
+    GIT_CONFIG_VALUE_0="$(git_auth_header)" \
+    git -c credential.helper= clone --quiet --depth 1 "https://github.com/${1}.git" "$2"
 }
 
 # fetch_context <repo> <num> <outdir> — thread context file (title/body +
@@ -175,7 +180,7 @@ abort_item() {
   local repo="$1" num="$2" rundir="$3" stage="$4"
   printf '**dsh agent** — this task failed in the worker before reaching the agent (stage: %s). Nothing was changed or shipped. Check the worker log and retry with a new `/dsh` comment.' "$stage" \
     > "$rundir/aborted.md"
-  gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/aborted.md" >/dev/null 2>&1 || true
+  gh api "repos/${repo}/issues/${num}/comments" -f body="$(cat $rundir/aborted.md)" >/dev/null 2>&1 || true
   gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true
   rm -rf "$rundir"
 }
@@ -212,7 +217,7 @@ review_item() {
   git_clone "$repo" "$work" \
     || { echo "worker: review checkout failed on $repo — noting the thread, no auto-requeue" >&2
          printf '**dsh review** — the worker could not clone the repo for this review (clone/egress failure). The review item was dropped (no auto-retry); re-run with `/review` to retry.' > "$rundir/clone-failed.md"
-         gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/clone-failed.md" >/dev/null 2>&1 || true
+         gh api "repos/${repo}/issues/${num}/comments" -f body="$(cat $rundir/clone-failed.md)" >/dev/null 2>&1 || true
          rm -rf "$rundir"; return 1; }
 
   # Hard cap: reviews default to 45m (the legacy agent-review workflow's
@@ -238,7 +243,7 @@ review_item() {
     # but the drop is NEVER silent: the thread gets a note and a human can
     # re-fire /review (drift finding 2 on v1.46.0).
     printf '**dsh review** — the worker review of this PR failed before producing a verdict (worker exit %s, run %s). No labels were changed. Re-run with `/review` to retry.' "$rc" "$runid" > "$rundir/review-failed.md"
-    gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/review-failed.md" >/dev/null 2>&1 || true
+    gh api "repos/${repo}/issues/${num}/comments" -f body="$(cat $rundir/review-failed.md)" >/dev/null 2>&1 || true
   fi
   rm -rf "$rundir"
   prune_runs
@@ -274,7 +279,7 @@ process_item() {
     echo "worker: no trusted /dsh comment found on $repo #$num — replying and closing the item"
     printf '**dsh agent** — no trusted `/dsh` comment found on this thread (the trigger comment must come from an OWNER/MEMBER/COLLABORATOR and start with `/dsh` or `@dsh-agent`).' \
       > "$rundir/nothing-to-do.md"
-    gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/nothing-to-do.md" >/dev/null 2>&1 || true
+    gh api "repos/${repo}/issues/${num}/comments" -f body="$(cat $rundir/nothing-to-do.md)" >/dev/null 2>&1 || true
     gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true
     rm -rf "$rundir"
     return 0
@@ -287,7 +292,7 @@ process_item() {
     echo "worker: empty task after stripping the trigger (bare /dsh) — replying and closing the item"
     printf '**dsh agent** — the trigger comment had no task text after the `/dsh` prefix; nothing to do.' \
       > "$rundir/empty-task.md"
-    gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/empty-task.md" >/dev/null 2>&1 || true
+    gh api "repos/${repo}/issues/${num}/comments" -f body="$(cat $rundir/empty-task.md)" >/dev/null 2>&1 || true
     gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true
     rm -rf "$rundir"
     return 0
@@ -301,8 +306,8 @@ process_item() {
     git_clone "$repo" "$work"
     if [ "$kind" = "pr" ]; then
       GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
-        GIT_CONFIG_VALUE_0="Authorization: token ${GH_TOKEN}" \
-        git -C "$work" fetch -q --depth 1 origin "refs/pull/${num}/merge"
+        GIT_CONFIG_VALUE_0="$(git_auth_header)" \
+        git -C "$work" -c credential.helper= fetch -q --depth 1 origin "refs/pull/${num}/merge"
       git -C "$work" checkout -q FETCH_HEAD
     fi
   } || { echo "worker: checkout failed on $repo (token scope?) — aborting item" >&2; abort_item "$repo" "$num" "$rundir" "checkout of the target ref"; return 1; }

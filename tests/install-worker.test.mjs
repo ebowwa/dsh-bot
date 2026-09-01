@@ -67,7 +67,10 @@ test("installs the env file 0600 with the values; cron line has NO credential", 
 
     const cron = readFileSync(f.store, "utf8");
     assert.match(cron, /dsh-worker\.sh --once/, "keepalive line installed");
-    assert.match(cron, /pgrep -f 'dsh-worker\.sh --once'/, "pgrep-guarded");
+    // the guard must NOT self-match its wrapping shell (live defect on
+    // seed-dshbot: plain pattern matched the sh -c carrier, sweep never ran)
+    assert.match(cron, /pgrep -f '\[d\]sh-worker\.sh --once'/, "pgrep-guarded with the [d] bracket trick");
+    assert.ok(!cron.includes("pgrep -f 'dsh-worker.sh --once'"), "plain self-matching pattern must not ship");
     assert.match(cron, /checkout -q v1/, "re-pins to the moving v1 tag each sweep");
     assert.ok(!cron.includes(GH_CRED), "NO credential in the cron line");
     assert.ok(!cron.includes(DOPPLER_CRED), "NO doppler credential in the cron line");
