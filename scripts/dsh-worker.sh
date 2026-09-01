@@ -41,11 +41,16 @@
 #   DSH_WORKER_REVIEW_RULES_FILE repo-relative rules (default REVIEW.md)
 #   DSH_WORKER_QUEUE_LABEL / DSH_WORKER_RUN_LABEL (defaults dsh/queued,
 #                       dsh/running)
+#   DSH_WORKER_REVIEW_LABEL  review-queue label (default dsh/review) —
+#                       review-only items claimed and run through
+#                       review-pr.sh (the decoupled review stage)
 #   DSH_WORKER_ACK_MARKER   HTML marker the trigger bakes into the ack
 #                       comment so the worker can find it (default dsh:ack)
-#   DSH_WORKER_TIMEOUT_MIN  per-agent-run cap (default 120) — enforced via
+#   DSH_WORKER_TIMEOUT_MIN  per-AGENT-run cap (default 120) — enforced via
 #                       GNU `timeout` when present; without it the worker
 #                       warns once and runs without a hard cap
+#   DSH_WORKER_REVIEW_TIMEOUT_MIN  per-REVIEW cap (default 45, the legacy
+#                       agent-review workflow timeout) — same enforcement
 #   DSH_WORKER_KEEP_RUNS    how many run dirs to keep (default 10)
 #   DSH_WORKER_TICK_S       loop sleep seconds (default 60)
 #
@@ -198,18 +203,24 @@ review_item() {
   fi
 
   # fresh clone at the default branch; review-pr.sh fetches the PR merge
-  # ref + base ref itself and diffs base...merge inside it
+  # ref + base ref itself and diffs base...merge inside it. Clone failures
+  # are the transient class (network/egress): re-queue AND leave a thread
+  # note so the retry is visible (drift finding 2 on v1.46.0: silent
+  # drops).
   git_clone "$repo" "$work" \
-    || { echo "worker: review checkout failed on $repo — aborting review" >&2
+    || { echo "worker: review checkout failed on $repo — re-queuing + noting the thread" >&2
+         printf '**dsh review** — the worker could not clone the repo for this review (transient/egress class); the review item was re-queued and will retry on the next sweep.' > "$rundir/clone-failed.md"
+         gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/clone-failed.md" >/dev/null 2>&1 || true
          gh api -X POST "repos/${repo}/issues/${num}/labels" -f labels[]="$REVIEW_LABEL" >/dev/null 2>&1 || true
          rm -rf "$rundir"; return 1; }
 
-  # Same hard cap as agent tasks (the legacy review had a 45-min workflow
-  # timeout; on the worker only GNU timeout enforces one). Without it a
-  # hung review runs forever on an always-on box.
+  # Hard cap: reviews default to 45m (the legacy agent-review workflow's
+  # own timeout) via DSH_WORKER_REVIEW_TIMEOUT_MIN — agent tasks keep their
+  # separate DSH_WORKER_TIMEOUT_MIN (drift INFO note 4 on v1.46.0: one
+  # env, two very different legacy budgets).
   REVIEW_TIMEOUT_ARGS=()
   if command -v timeout >/dev/null 2>&1; then
-    REVIEW_TIMEOUT_ARGS=(timeout --signal=TERM --kill-after=60 "${DSH_WORKER_TIMEOUT_MIN:-120}m")
+    REVIEW_TIMEOUT_ARGS=(timeout --signal=TERM --kill-after=60 "${DSH_WORKER_REVIEW_TIMEOUT_MIN:-45}m")
   else
     echo "worker: GNU timeout unavailable — review runs without a hard cap (provision the box)" >&2
   fi
@@ -220,6 +231,14 @@ review_item() {
     DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
     bash "$DSH_BOT_DIR/scripts/review-pr.sh" || rc=$?
   echo "worker: review of $repo #$num exited $rc (verdicts never auto-approve; see the PR thread)"
+  if [ "$rc" -ne 0 ]; then
+    # Mid-review failure (timeout=124, crash, typed exit): the label stays
+    # OFF (no auto-retry — a systemic failure must not loop the worker),
+    # but the drop is NEVER silent: the thread gets a note and a human can
+    # re-fire /review (drift finding 2 on v1.46.0).
+    printf '**dsh review** — the worker review of this PR failed before producing a verdict (worker exit %s, run %s). No labels were changed. Re-run with `/review` to retry.' "$rc" "$runid" > "$rundir/review-failed.md"
+    gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/review-failed.md" >/dev/null 2>&1 || true
+  fi
   rm -rf "$rundir"
   prune_runs
 }

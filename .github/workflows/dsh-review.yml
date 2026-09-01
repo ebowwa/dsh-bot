@@ -35,7 +35,11 @@ jobs:
           && github.event.comment.user.type != 'Bot'
           && contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
           && github.event.issue.pull_request)
-    uses: ebowwa/dsh-bot/.github/workflows/agent-review-thin.yml@main
+    # @v1 (the moving major tag drift-check advances on TAG verdicts) —
+    # NOT @main: an unpinned main ref means every merge instantly changes
+    # this repo's own review path with no audit gate between (drift
+    # finding 1 on v1.46.0).
+    uses: ebowwa/dsh-bot/.github/workflows/agent-review-thin.yml@v1
     secrets: inherit
     with:
       # workflow_dispatch passes inputs.pr; the /review comment path
