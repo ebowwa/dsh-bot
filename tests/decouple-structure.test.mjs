@@ -204,8 +204,10 @@ test("live fixes (seed-dshbot): Basic-auth git header, $(cat) note bodies, brack
   // keepalive overlap guard is flock — EVERY pgrep form self-matches the
   // carrier's cmdline (which contains the real script path in the sweep
   // braces); proven live twice on seed-dshbot
-  assert.match(inst, /flock -n /);
-  assert.ok(!/pgrep/.test(inst), "no pgrep guard may ship in the keepalive");
+  const line = inst.split("\n").find(l => l.startsWith('LINE="'));
+  assert.ok(line, "the keepalive LINE is defined");
+  assert.match(line, /flock -n /, "flock overlap guard");
+  assert.ok(!line.includes("pgrep"), "no pgrep in the keepalive line (self-matching class)");
   // upgrade path: the canonical line is always re-enforced
   assert.match(inst, /canonical line enforced/);
 });
