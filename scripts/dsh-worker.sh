@@ -46,6 +46,10 @@
 #   DSH_WORKER_REVIEW_RULES_FILE repo-relative rules (default REVIEW.md)
 #   DSH_WORKER_QUEUE_LABEL / DSH_WORKER_RUN_LABEL (defaults dsh/queued,
 #                       dsh/running)
+#   DSH_WORKER_TASK_LABEL   dispatched-task label (default dsh/task) —
+#                       task issues created by agent-dispatch-thin.yml;
+#                       claimed and run through the agent (the legacy
+#                       runner-holding agent-dispatch.yml path, retired)
 #   DSH_WORKER_REVIEW_LABEL  review-queue label (default dsh/review) —
 #                       review-only items claimed and run through
 #                       review-pr.sh (the decoupled review stage)
@@ -89,6 +93,7 @@ DATA="${DSH_WORKER_DATA_ROOT:-$HOME/.dsh-worker}"
 QUEUE_LABEL="${DSH_WORKER_QUEUE_LABEL:-dsh/queued}"
 RUN_LABEL="${DSH_WORKER_RUN_LABEL:-dsh/running}"
 REVIEW_LABEL="${DSH_WORKER_REVIEW_LABEL:-dsh/review}"
+TASK_LABEL="${DSH_WORKER_TASK_LABEL:-dsh/task}"
 ACK_MARKER="${DSH_WORKER_ACK_MARKER:-dsh:ack}"
 MODEL="${DSH_WORKER_MODEL:-zai/glm-5.3}"
 # model_for <owner/repo> — per-repo override when mapped, else the fleet
@@ -119,6 +124,7 @@ ensure_labels() { # $1 = owner/repo
   gh label create "$QUEUE_LABEL" --repo "$repo" --force --color FBCA04 --description "dsh task queued (decoupled worker)" >/dev/null 2>&1 || true
   gh label create "$RUN_LABEL"    --repo "$repo" --force --color 0E8A16 --description "dsh task running (decoupled worker)" >/dev/null 2>&1 || true
   gh label create "$REVIEW_LABEL" --repo "$repo" --force --color D93F0B --description "dsh review requested (decoupled worker)" >/dev/null 2>&1 || true
+  gh label create "$TASK_LABEL"   --repo "$repo" --force --color 1D76DB --description "dsh dispatched task (decoupled worker)" >/dev/null 2>&1 || true
 }
 
 # git auth via ENV-based config (GIT_CONFIG_COUNT): the value rides the
@@ -263,6 +269,98 @@ review_item() {
     gh api "repos/${repo}/issues/${num}/comments" -f body="$(cat $rundir/review-failed.md)" >/dev/null 2>&1 || true
   fi
   rm -rf "$rundir"
+  prune_runs
+}
+
+# task_item <repo> <num> — a DISPATCHED TASK item (the dsh/task label on
+# an issue created by agent-dispatch-thin.yml). The task text and its
+# options ride the issue body as a structured marker block; the marker is
+# provenance (written by the privileged trigger), and an issue without it
+# is NOT a task. Semantics match the legacy agent-dispatch path: the agent
+# pushes/opens PRs itself (no shipper step, no comment-bot mode), and its
+# final answer is posted back on the task issue, which is then closed.
+task_item() {
+  local repo="$1" num="$2" runid rundir work rc title body task t_model t_sub t_base
+  runid="t$(date +%Y%m%d-%H%M%S)-$$"
+  rundir="$DATA/runs/$runid"
+  work="$rundir/repo"
+  mkdir -p "$rundir/tmp" "$work"
+  export TMPDIR="$rundir/tmp"
+  echo "==== worker [$runid] TASK $repo #$num ===="
+
+  # claim: remove the task label; 404 = another worker took it
+  if ! gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$TASK_LABEL")" >/dev/null 2>&1; then
+    echo "worker: task claim lost on $repo #$num (label gone) — skip"
+    rm -rf "$rundir"
+    return 0
+  fi
+
+  body="$(gh issue view "$num" --repo "$repo" --json body --jq .body 2>/dev/null || true)"
+  if ! printf '%s' "$body" | grep -q '<!-- dsh:task'; then
+    # not a trigger-created task: relabel loudly, never run arbitrary bodies
+    echo "worker: $repo #$num carries $TASK_LABEL without the dsh:task marker — not a dispatched task; label dropped" >&2
+    printf '**dsh worker** — this issue carried the task label without the trigger marker; nothing was run. Dispatch tasks come from the agent-dispatch trigger.'       > "$rundir/not-a-task.md"
+    gh api "repos/${repo}/issues/${num}/comments" -f body="$(cat "$rundir/not-a-task.md")" >/dev/null 2>&1 || true
+    rm -rf "$rundir"
+    return 0
+  fi
+
+  # parse the marker block (key: value) and strip it from the task text
+  t_model="$(printf '%s' "$body" | sed -n 's/^model: //p' | head -n1)"
+  t_sub="$(printf '%s' "$body" | sed -n 's/^subagent-model: //p' | head -n1)"
+  t_base="$(printf '%s' "$body" | sed -n 's/^base-ref: //p' | head -n1)"
+  task="$(printf '%s' "$body" | sed -n '/^ -->$/,$p' | tail -n +2 | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  if [ -z "$task" ]; then
+    echo "worker: task issue $repo #$num has an empty task body — closing with a note" >&2
+    gh api "repos/${repo}/issues/${num}/comments" -f body="**dsh worker** — the dispatched task carried no task text; nothing was run." >/dev/null 2>&1 || true
+    gh issue close "$num" --repo "$repo" >/dev/null 2>&1 || true
+    rm -rf "$rundir"
+    return 0
+  fi
+
+  # model resolution: the task's explicit model > the repo map > fleet default
+  ITEM_MODEL="${t_model:-$(model_for "$repo")}"
+
+  # checkout: default branch, or the requested ref when valid
+  git_clone "$repo" "$work" \
+    || { echo "worker: task checkout failed on $repo — noting the thread, no auto-retry" >&2
+         gh api "repos/${repo}/issues/${num}/comments" -f body="**dsh worker** — the checkout for this dispatched task failed (clone/egress); the task was dropped. Re-dispatch to retry." >/dev/null 2>&1 || true
+         gh issue close "$num" --repo "$repo" >/dev/null 2>&1 || true
+         rm -rf "$rundir"; return 1; }
+  if [ -n "$t_base" ] && git -C "$work" -c credential.helper= fetch -q --depth 1 origin "refs/heads/${t_base}:refs/remotes/origin/taskbase" 2>/dev/null; then
+    git -C "$work" checkout -q refs/remotes/origin/taskbase \
+      || echo "worker: base-ref '$t_base' checkout fell back to the default branch" >&2
+  fi
+
+  # push credential (the agent pushes itself in dispatch mode)
+  ( cd "$work" && PUSH_FALLBACK_CRED="$GH_TOKEN" DOPPLER_SERVICE_TOKEN="${DOPPLER_SERVICE_TOKEN:-}" \
+      bash "$DSH_BOT_DIR/scripts/resolve-push-token.sh" ) \
+    || { echo "worker: task push-credential write failed — aborting" >&2
+         gh api "repos/${repo}/issues/${num}/comments" -f body="**dsh worker** — the push credential could not be written for this task; nothing ran. Re-dispatch to retry." >/dev/null 2>&1 || true
+         rm -rf "$rundir"; return 1; }
+
+  # run the agent (dispatch semantics: REPLY_TARGET empty — the agent may
+  # push and open PRs itself; its final answer is posted by the worker)
+  TIMEOUT_ARGS=()
+  if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_ARGS=(timeout --signal=TERM --kill-after=60 "${DSH_WORKER_TIMEOUT_MIN:-120}m")
+  else
+    echo "worker: GNU timeout unavailable — task runs without a hard cap (provision the box)" >&2
+  fi
+  rc=0
+  ( cd "$work" && export DSH_MODEL="$ITEM_MODEL" DSH_SUBAGENT_MODEL="${t_sub:-}" REPLY_TARGET="" DSH_BOT_DIR="$DSH_BOT_DIR" DSH_RUNNER_NAME="$WORKER_NAME" \
+      "${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash "$DSH_BOT_DIR/scripts/run-dsh-agent.sh" "$task" ) \
+    | node "$DSH_BOT_DIR/scripts/scrub-output.mjs" | tee "$rundir/agent-output.txt" >/dev/null
+  rc=$?
+  echo "worker: task agent exited $rc"
+
+  # reply on the task issue and close it (the answer is the record)
+  DSH_SHIP_REPO="$repo" DSH_SHIP_CACHE="$rundir" DSH_AGENT_OUTPUT="$rundir/agent-output.txt" \
+    TARGET_KIND="issue" TARGET_NUM="$num" DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
+    bash "$DSH_BOT_DIR/scripts/post-reply.sh" \
+    || echo "worker: task reply step failed (the answer is in the run log)" >&2
+  gh issue close "$num" --repo "$repo" >/dev/null 2>&1 || true
+  echo "==== worker [$runid] TASK $repo #$num complete ===="
   prune_runs
 }
 
@@ -425,6 +523,23 @@ sweep() {
     done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${REVIEW_LABEL}&per_page=100" \
       --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' \
       || echo "worker: poll FAILED for $repo label '$REVIEW_LABEL' (gh error above, if any)" >&2)
+    # Dispatched tasks (dsh/task): the legacy runner-holding
+    # agent-dispatch path, retired — tasks run here like everything else.
+    echo "worker: polling $repo for label '$TASK_LABEL'"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      num="$(printf '%s' "$line" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).number?.toString() ?? "")')"
+      is_pr="$(printf '%s' "$line" | node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0,"utf8")).is_pr))')"
+      [ -n "$num" ] || continue
+      if [ "$is_pr" = "true" ]; then
+        echo "worker: dsh/task on $repo #$num is a PR — dropping the label (tasks are issue-only)"
+        gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$TASK_LABEL")" >/dev/null 2>&1 || true
+      else
+        task_item "$repo" "$num" || echo "worker: task $repo #$num failed (see above)" >&2
+      fi
+    done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${TASK_LABEL}&per_page=100" \
+      --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' \
+      || echo "worker: poll FAILED for $repo label '$TASK_LABEL' (gh error above, if any)" >&2)
   done
 }
 

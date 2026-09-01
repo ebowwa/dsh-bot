@@ -24,6 +24,7 @@ Two execution modes:
 |---|---|
 | `.github/workflows/agent-comment-thin.yml` | DECOUPLED trigger: ack (dsh:ack marker) + enqueue (dsh/queued label); github-hosted, ~20s |
 | `.github/workflows/agent-review-thin.yml` | DECOUPLED review trigger: enqueue a review (dsh/review label) on any PR — github-hosted, ~15s; the worker runs the review (no runner held) |
+| `.github/workflows/agent-dispatch-thin.yml` | DECOUPLED task trigger: creates a task issue (dsh/task label, options in a marker block) — legacy input surface kept for programmatic callers; the worker runs the task (no runner held) |
 | `.github/workflows/agent-comment.yml` | LEGACY comment loop: context fetch → scrub → agent → ship → reply → review dispatch |
 | `.github/workflows/agent-review.yml` | LEGACY adversarial review stage (rules + gates + verdict + labels) |
 | `.github/workflows/agent-dispatch.yml` | LEGACY manual/scheduled task entry |

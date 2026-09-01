@@ -219,3 +219,33 @@ test("per-repo model map: mapped repos run their own model, unmapped run the fle
   assert.match(w, /DSH_MODEL="\$ITEM_MODEL"/, "agent runs use the per-item model");
   assert.match(w, /DSH_REVIEW_MODEL="\$ITEM_REVIEW_MODEL"/, "reviews use the per-item model");
 });
+
+test("task queue: dispatched tasks run on the worker (the last runner-holding path, retired)", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /TASK_LABEL="\$\{DSH_WORKER_TASK_LABEL:-dsh\/task\}"/);
+  assert.match(w, /task_item\(\) \{/);
+  const pollIdx = w.indexOf("labels=${TASK_LABEL}&per_page=100");
+  assert.ok(pollIdx !== -1, "the sweep polls the task label");
+  assert.match(w, /task_item "\$repo" "\$num"/);
+  // the marker is REQUIRED — a user-labeled issue is never a task
+  assert.match(w, /without the dsh:task marker/);
+  // per-task model beats the repo map (dispatch semantics preserved)
+  assert.match(w, /ITEM_MODEL="\$\{t_model:-\$\(model_for "\$repo"\)\}"/);
+  // dispatch semantics: the agent pushes itself (REPLY_TARGET empty)
+  assert.match(w, /REPLY_TARGET="" DSH_BOT_DIR/);
+  // timeout cap applies to tasks too
+  assert.match(w, /\$\{DSH_WORKER_TIMEOUT_MIN:-120\}m/);
+});
+
+test("task queue: the thin dispatch trigger exists with the legacy input surface", () => {
+  const t = read(".github/workflows/agent-dispatch-thin.yml");
+  assert.match(t, /runs-on: ubuntu-latest/);
+  for (const input of ["task:", "base-ref:", "runner:", "model:", "subagent-model:", "timeout-minutes:", "review-workflow:", "dsh-bot-ref:"]) {
+    assert.ok(t.includes(input), "input surface kept: " + input);
+  }
+  assert.match(t, /dsh\/task/);
+  assert.match(t, /<!-- dsh:task/);
+  assert.match(t, /gh issue create/);
+  // charset guard present (values ride parsed text)
+  assert.match(t, /\[!A-Za-z0-9._\/\-/);
+});
