@@ -43,6 +43,11 @@ Review rules for dsh-bot, applied by the dsh review stage (and any human).
 - Queue labels are NOT a trust mechanism: `dsh/queued` must only ever be
   acted on after the worker re-derives the trigger's trust from the
   comments API. A worker change that trusts the label alone is rejected.
+- Reviews are queue items too (`dsh/review` via `agent-review-thin.yml`):
+  this repo's own review path must not dispatch a runner-holding review
+  workflow (`agent-review.yml` on `[self-hosted, dsh]`) — reviews run on
+  the worker or in-session. Reintroducing a runner-holding review shell
+  for dsh-bot itself is a defect.
 - The worker review must never auto-approve: verdicts are label actions
   ONLY from `review-verdict.mjs`'s line-strict parse; an absent or
   unparseable verdict sets NO labels and must surface for a human. The

@@ -78,6 +78,7 @@ CHECK_ENV DSH_WORKER_REPOS
 DATA="${DSH_WORKER_DATA_ROOT:-$HOME/.dsh-worker}"
 QUEUE_LABEL="${DSH_WORKER_QUEUE_LABEL:-dsh/queued}"
 RUN_LABEL="${DSH_WORKER_RUN_LABEL:-dsh/running}"
+REVIEW_LABEL="${DSH_WORKER_REVIEW_LABEL:-dsh/review}"
 ACK_MARKER="${DSH_WORKER_ACK_MARKER:-dsh:ack}"
 MODEL="${DSH_WORKER_MODEL:-zai/glm-5.3}"
 REVIEW_MODEL="${DSH_WORKER_REVIEW_MODEL:-$MODEL}"
@@ -96,6 +97,7 @@ ensure_labels() { # $1 = owner/repo
   local repo="$1" c
   gh label create "$QUEUE_LABEL" --repo "$repo" --force --color FBCA04 --description "dsh task queued (decoupled worker)" >/dev/null 2>&1 || true
   gh label create "$RUN_LABEL"    --repo "$repo" --force --color 0E8A16 --description "dsh task running (decoupled worker)" >/dev/null 2>&1 || true
+  gh label create "$REVIEW_LABEL" --repo "$repo" --force --color D93F0B --description "dsh review requested (decoupled worker)" >/dev/null 2>&1 || true
 }
 
 # git auth via ENV-based config (GIT_CONFIG_COUNT): the value rides the
@@ -171,6 +173,55 @@ abort_item() {
   gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/aborted.md" >/dev/null 2>&1 || true
   gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true
   rm -rf "$rundir"
+}
+
+# review_item <repo> <num> — a REVIEW-ONLY queue item (the dsh/review
+# label, added by the thin review trigger on a /review comment or a
+# workflow_dispatch). This is the decoupled replacement for the legacy
+# agent-review.yml path: the review of ANY PR runs on the worker, and no
+# Actions job ever holds a self-hosted runner for it. Claim semantics are
+# the label-DELETE race as agent tasks.
+review_item() {
+  local repo="$1" num="$2" runid rundir work rc
+  runid="r$(date +%Y%m%d-%H%M%S)-$$"
+  rundir="$DATA/runs/$runid"
+  work="$rundir/repo"
+  mkdir -p "$rundir/tmp" "$work"
+  export TMPDIR="$rundir/tmp"
+  echo "==== worker [$runid] REVIEW $repo #$num ===="
+
+  # claim: remove the review label; 404 = another worker took it
+  if ! gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$REVIEW_LABEL")" >/dev/null 2>&1; then
+    echo "worker: review claim lost on $repo #$num (label gone) — skip"
+    rm -rf "$rundir"
+    return 0
+  fi
+
+  # fresh clone at the default branch; review-pr.sh fetches the PR merge
+  # ref + base ref itself and diffs base...merge inside it
+  git_clone "$repo" "$work" \
+    || { echo "worker: review checkout failed on $repo — aborting review" >&2
+         gh api -X POST "repos/${repo}/issues/${num}/labels" -f labels[]="$REVIEW_LABEL" >/dev/null 2>&1 || true
+         rm -rf "$rundir"; return 1; }
+
+  # Same hard cap as agent tasks (the legacy review had a 45-min workflow
+  # timeout; on the worker only GNU timeout enforces one). Without it a
+  # hung review runs forever on an always-on box.
+  REVIEW_TIMEOUT_ARGS=()
+  if command -v timeout >/dev/null 2>&1; then
+    REVIEW_TIMEOUT_ARGS=(timeout --signal=TERM --kill-after=60 "${DSH_WORKER_TIMEOUT_MIN:-120}m")
+  else
+    echo "worker: GNU timeout unavailable — review runs without a hard cap (provision the box)" >&2
+  fi
+  rc=0
+  "${REVIEW_TIMEOUT_ARGS[@]+"${REVIEW_TIMEOUT_ARGS[@]}"}" \
+    env DSH_SHIP_REPO="$repo" DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$REVIEW_MODEL" \
+    DSH_REVIEW_RULES_FILE="$REVIEW_RULES_FILE" DSH_WORKTREE="$work" PR_NUM="$num" \
+    DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
+    bash "$DSH_BOT_DIR/scripts/review-pr.sh" || rc=$?
+  echo "worker: review of $repo #$num exited $rc (verdicts never auto-approve; see the PR thread)"
+  rm -rf "$rundir"
+  prune_runs
 }
 
 # process_item <repo> <num> <is_pr>
@@ -312,6 +363,22 @@ sweep() {
       [ -n "$num" ] || continue
       process_item "$repo" "$num" "$is_pr" || echo "worker: $repo #$num failed (see above)" >&2
     done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${QUEUE_LABEL}&per_page=100" \
+      --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' 2>/dev/null || true)
+    # Review-only items (dsh/review): the decoupled review stage — reviews
+    # of ANY PR run here, never in a runner-holding Actions job.
+    echo "worker: polling $repo for label '$REVIEW_LABEL'"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      num="$(printf '%s' "$line" | node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(0,"utf8")).number?.toString() ?? "")')"
+      is_pr="$(printf '%s' "$line" | node -e 'process.stdout.write(String(JSON.parse(require("fs").readFileSync(0,"utf8")).is_pr))')"
+      [ -n "$num" ] || continue
+      if [ "$is_pr" = "true" ]; then
+        review_item "$repo" "$num" || echo "worker: review $repo #$num failed (see above)" >&2
+      else
+        echo "worker: dsh/review on $repo #$num is not a PR — dropping the label (reviews are PR-only)"
+        gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$REVIEW_LABEL")" >/dev/null 2>&1 || true
+      fi
+    done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${REVIEW_LABEL}&per_page=100" \
       --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' 2>/dev/null || true)
   done
 }

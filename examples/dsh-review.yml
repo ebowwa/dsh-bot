@@ -1,4 +1,8 @@
-# Consumer shell — .github/workflows/dsh-review.yml in YOUR repo.
+# Consumer shell (DECOUPLED mode) — .github/workflows/dsh-review.yml in
+# YOUR repo. Enqueues the review (dsh/review label); the out-of-band
+# worker runs it (scripts/review-pr.sh: rules from the PR BASE,
+# line-strict verdict, labels per verdict — never auto-approves). No
+# self-hosted runners, no DOPPLER_SERVICE_TOKEN, no DSH_BOT_REPO_TOKEN.
 
 name: dsh review
 
@@ -19,18 +23,22 @@ permissions:
 
 concurrency:
   group: dsh-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
-  cancel-in-progress: true
+  # false is load-bearing: re-fires on unreviewed PRs must not cancel a
+  # running (enqueued) review.
+  cancel-in-progress: false
 
 jobs:
   dsh-review:
     if: >-
-      (github.event_name == 'workflow_dispatch')
+      (github.event_name == 'workflow_dispatch' && inputs.pr != '')
       || (github.event_name == 'issue_comment'
           && startsWith(github.event.comment.body, '/review')
           && github.event.comment.user.type != 'Bot'
           && contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
           && github.event.issue.pull_request)
-    uses: ebowwa/dsh-bot/.github/workflows/agent-review.yml@v1
+    uses: ebowwa/dsh-bot/.github/workflows/agent-review-thin.yml@v1
     secrets: inherit
     with:
-      rules-file: "REVIEW.md"
+      # workflow_dispatch passes inputs.pr; the /review comment path
+      # resolves the PR number from the issue the comment belongs to.
+      pr: ${{ inputs.pr || github.event.issue.number }}

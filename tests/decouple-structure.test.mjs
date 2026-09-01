@@ -135,3 +135,30 @@ test("decoupled-mode docs exist and describe the queue + trust model", () => {
   assert.match(doc, /DSH_WORKER_REPOS/);
   assert.match(doc, /never auto-approves/);
 });
+test("review queue: worker claims dsh/review items and runs review-pr.sh on them", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /REVIEW_LABEL="\$\{DSH_WORKER_REVIEW_LABEL:-dsh\/review\}"/);
+  assert.match(w, /review_item\(\) \{/);
+  // the sweep polls the review label and routes PRs to review_item
+  const pollIdx = w.indexOf("labels=${REVIEW_LABEL}&per_page=100");
+  assert.ok(pollIdx !== -1, "sweep must poll the review label");
+  assert.match(w, /review_item "\$repo" "\$num"/);
+  // claim semantics identical to agent tasks: DELETE the label to claim
+  assert.match(w, /labels\/\$\(label_enc "\$REVIEW_LABEL"\)/);
+});
+
+test("review queue: dsh-review.yml is THIN — enqueues, never holds a runner", () => {
+  const shell = read(".github/workflows/dsh-review.yml");
+  assert.ok(!shell.includes("agent-review.yml@"), "the runner-holding legacy review must not be dispatched by this repo's own shell");
+  assert.match(shell, /agent-review-thin\.yml/);
+  const thin = read(".github/workflows/agent-review-thin.yml");
+  assert.match(thin, /runs-on: ubuntu-latest/);
+  assert.match(thin, /dsh\/review/);
+  assert.match(thin, /labels\[\]/);
+});
+
+test("review queue: consumer example enqueues the decoupled review", () => {
+  const ex = read("examples/dsh-review.yml");
+  assert.match(ex, /agent-review-thin\.yml/);
+  assert.ok(!ex.includes("agent-review.yml@"), "example must not point at the runner-holding review");
+});
