@@ -79,16 +79,16 @@ cd "$DSH_WORKTREE" || { echo "review-pr: cannot cd to $DSH_WORKTREE" >&2; exit 2
 # credential resolve-push-token.sh wrote lives in .git/config, so these
 # extra fetches can ride the same env seam and are harmless when the token
 # is absent (public repos).
-fetch_merge() {
+# BASIC auth (base64 x-access-token:TOKEN): the API-scheme header 401s on
+# git http (proven live on seed-dshbot). Env-borne, never argv; the stale
+# box credential helper is reset.
+gh_fetch() { # <refspec:local-ref>
   GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
-    GIT_CONFIG_VALUE_0="Authorization: token $GH_TOKEN" \
-    git fetch -q --depth 1 origin "refs/pull/${PR_NUM}/merge:refs/remotes/origin/pr-merge"
+    GIT_CONFIG_VALUE_0="$(printf 'AUTHORIZATION: basic %s' "$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')")" \
+    git -c credential.helper= fetch -q --depth 1 origin "$1"
 }
-fetch_base() {
-  GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
-    GIT_CONFIG_VALUE_0="Authorization: token $GH_TOKEN" \
-    git fetch -q --depth 1 origin "refs/heads/${BASE_REF}:refs/remotes/origin/base"
-}
+fetch_merge() { gh_fetch "refs/pull/${PR_NUM}/merge:refs/remotes/origin/pr-merge"; }
+fetch_base()   { gh_fetch "refs/heads/${BASE_REF}:refs/remotes/origin/base"; }
 fetch_merge 2>/dev/null \
   || { echo "review-pr: cannot fetch PR #$PR_NUM merge ref" >&2; rm -f "$RULES_TMP"; exit 2; }
 fetch_base 2>/dev/null || true

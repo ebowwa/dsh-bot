@@ -189,3 +189,19 @@ test("drift v1.46.0 findings: pin, failure notes, review cap — all fixed", () 
   assert.match(w, /DSH_WORKER_REVIEW_LABEL\s+review-queue label/);
   assert.match(w, /\$\{DSH_WORKER_REVIEW_TIMEOUT_MIN:-45\}m/);
 });
+
+test("live fixes (seed-dshbot): Basic-auth git header, $(cat) note bodies, bracket pgrep", () => {
+  const w = read("scripts/dsh-worker.sh");
+  // git auth is BASIC (base64 x-access-token:...) — the API-scheme header
+  // 401'd on git http with a VALID token (live: API green, clone 401)
+  assert.match(w, /AUTHORIZATION: basic/);
+  assert.ok(!/Authorization: token \$\{GH_TOKEN\}/.test(w), "API-scheme header must not ride git http");
+  // note bodies post via $(cat …) — the @file form posted a literal path
+  // string live on PR #44
+  assert.ok(!/-f body=@/.test(w), "@file bodies must not be used (did not expand on the box gh)");
+  assert.match(w, /-f body="\$\(cat \$rundir\//);
+  const inst = read("scripts/install-worker.sh");
+  assert.match(inst, /'\[d\]sh-worker\.sh --once'/);
+  // upgrade path: a previously installed self-matching line gets REPLACED
+  assert.match(inst, /replacing the pre-fix \(self-matching\) keepalive/);
+});
