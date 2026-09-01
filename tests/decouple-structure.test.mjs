@@ -177,11 +177,13 @@ test("drift v1.46.0 findings: pin, failure notes, review cap — all fixed", () 
   const failNoteIdx = w.indexOf("worker review of this PR failed");
   const requeueAfterFail = w.slice(failNoteIdx, failNoteIdx + 900).includes('f labels[]="$REVIEW_LABEL"');
   assert.ok(!requeueAfterFail, "the mid-review failure path must NOT re-queue the label");
-  // ...while the CLONE-failure path (transient class) DOES re-queue + note
+  // ...and NEITHER failure path auto-requeues: an unconditional re-queue
+  // on a persistently failing clone posts one comment per sweep forever
+  // (self-caught during this PR's own review) — humans re-fire /review.
   const cloneFailIdx = w.indexOf("could not clone the repo for this review");
   assert.ok(cloneFailIdx !== -1, "clone failure posts a thread note");
-  assert.ok(w.slice(cloneFailIdx, cloneFailIdx + 900).includes('f labels[]="$REVIEW_LABEL"'),
-    "the clone-failure path re-queues the item (transient class)");
+  assert.ok(!w.slice(cloneFailIdx, cloneFailIdx + 900).includes('f labels[]="$REVIEW_LABEL"'),
+    "the clone-failure path must NOT re-queue (comment-spam loop)");
   // F3 + INFO 4: the header documents the review label + a separate
   // review cap with the legacy 45m default.
   assert.match(w, /DSH_WORKER_REVIEW_LABEL\s+review-queue label/);

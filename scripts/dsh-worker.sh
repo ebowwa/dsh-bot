@@ -203,15 +203,16 @@ review_item() {
   fi
 
   # fresh clone at the default branch; review-pr.sh fetches the PR merge
-  # ref + base ref itself and diffs base...merge inside it. Clone failures
-  # are the transient class (network/egress): re-queue AND leave a thread
-  # note so the retry is visible (drift finding 2 on v1.46.0: silent
-  # drops).
+  # ref + base ref itself and diffs base...merge inside it. ANY failure
+  # after claim notes the thread and leaves the label OFF — including
+  # clone failures (drift finding 2 on v1.46.0: silent drops). No
+  # auto-requeue anywhere: an unconditional re-queue on a persistently
+  # failing clone would post one comment per sweep, forever (self-caught
+  # during this PR's review); a human re-fires /review instead.
   git_clone "$repo" "$work" \
-    || { echo "worker: review checkout failed on $repo — re-queuing + noting the thread" >&2
-         printf '**dsh review** — the worker could not clone the repo for this review (transient/egress class); the review item was re-queued and will retry on the next sweep.' > "$rundir/clone-failed.md"
+    || { echo "worker: review checkout failed on $repo — noting the thread, no auto-requeue" >&2
+         printf '**dsh review** — the worker could not clone the repo for this review (clone/egress failure). The review item was dropped (no auto-retry); re-run with `/review` to retry.' > "$rundir/clone-failed.md"
          gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/clone-failed.md" >/dev/null 2>&1 || true
-         gh api -X POST "repos/${repo}/issues/${num}/labels" -f labels[]="$REVIEW_LABEL" >/dev/null 2>&1 || true
          rm -rf "$rundir"; return 1; }
 
   # Hard cap: reviews default to 45m (the legacy agent-review workflow's
