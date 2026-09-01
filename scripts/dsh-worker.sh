@@ -204,8 +204,18 @@ review_item() {
          gh api -X POST "repos/${repo}/issues/${num}/labels" -f labels[]="$REVIEW_LABEL" >/dev/null 2>&1 || true
          rm -rf "$rundir"; return 1; }
 
+  # Same hard cap as agent tasks (the legacy review had a 45-min workflow
+  # timeout; on the worker only GNU timeout enforces one). Without it a
+  # hung review runs forever on an always-on box.
+  REVIEW_TIMEOUT_ARGS=()
+  if command -v timeout >/dev/null 2>&1; then
+    REVIEW_TIMEOUT_ARGS=(timeout --signal=TERM --kill-after=60 "${DSH_WORKER_TIMEOUT_MIN:-120}m")
+  else
+    echo "worker: GNU timeout unavailable — review runs without a hard cap (provision the box)" >&2
+  fi
   rc=0
-  DSH_SHIP_REPO="$repo" DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$REVIEW_MODEL" \
+  "${REVIEW_TIMEOUT_ARGS[@]+"${REVIEW_TIMEOUT_ARGS[@]}"}" \
+    env DSH_SHIP_REPO="$repo" DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$REVIEW_MODEL" \
     DSH_REVIEW_RULES_FILE="$REVIEW_RULES_FILE" DSH_WORKTREE="$work" PR_NUM="$num" \
     DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
     bash "$DSH_BOT_DIR/scripts/review-pr.sh" || rc=$?
