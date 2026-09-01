@@ -249,3 +249,16 @@ test("task queue: the thin dispatch trigger exists with the legacy input surface
   // charset guard present (values ride parsed text)
   assert.match(t, /\[!A-Za-z0-9._\/\-/);
 });
+
+test("driver invocations terminate their export with && (the continuation bug, live on the box)", () => {
+  const w = read("scripts/dsh-worker.sh");
+  const count = (w.match(/RUNNER_NAME="\$WORKER_NAME" \\/g) || []).length;
+  assert.ok(count >= 2, "both pipelines present (" + count + ")");
+  for (const line of w.split("\n")) {
+    if (line.includes('"${TIMEOUT_ARGS[@]+"${TIMEOUT_ARGS[@]}"}" bash')) {
+      assert.match(line, /^\s*&& /, "the driver command must open with && (never be export arguments): " + line.trim());
+    }
+  }
+  const rcCaptures = (w.match(/agent-output\.txt" >\/dev\/null \|\| rc=\$\?/g) || []).length;
+  assert.ok(rcCaptures >= 2, "both pipelines capture rc with || rc=$? (got " + rcCaptures + ")");
+});
