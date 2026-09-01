@@ -1,0 +1,46 @@
+# deploy-worker — ONE-DISPATCH install of the out-of-band worker on a
+# factory box (the self-register-factory pattern: workflows may install
+# persistent per-user services on self-hosted runners; cron keepalive
+# needs no sudo — issue #6's systemd path remains the upgrade when sudo
+# exists).
+#
+# After this runs once on a box, that box serves the decoupled pipeline:
+# /dsh tasks and /review requests flow through the queue labels, and NO
+# Actions job ever holds a self-hosted runner for the agent or a review.
+#
+# The worker's credentials land ONLY in ~/.dsh-worker/env (0600, written
+# by scripts/install-worker.sh from this run's secrets — the documented
+# deployment pattern in docs/decoupled-worker.md). The cron line never
+# contains a token; the toolkit re-pins to the moving `v1` tag each sweep,
+# so the worker's code updates exclusively through drift-check's audited
+# releases.
+
+name: deploy-worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos:
+        description: "DSH_WORKER_REPOS — space-separated owner/repo list this box serves"
+        type: string
+        default: "ebowwa/dsh-bot"
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, dsh]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the toolkit (the installer ships with it)
+        uses: actions/checkout@v4
+
+      # Lane impact: one ~1-min job, once per deploy (workflow_dispatch
+      # only). Installs a per-user cron service on the box — the
+      # self-register-factory precedent.
+      - name: Install the worker on this box (idempotent)
+        env:
+          WORKER_GH_CRED: ${{ secrets.BOT_PAT }}
+          WORKER_DOPPLER_CRED: ${{ secrets.DOPPLER_SERVICE_TOKEN }}
+          WORKER_REPOS: ${{ inputs.repos }}
+        run: |
+          set -euo pipefail
+          bash scripts/install-worker.sh

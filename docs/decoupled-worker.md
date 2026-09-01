@@ -49,8 +49,17 @@ serialization matches the CI flow: the worker takes the **last** trusted
 
 ## Installing the worker on a factory box
 
-Reuses the proven `self-register-factory.yml` patterns (cron keepalive
-needs no sudo; `svc.sh`/systemd when sudo exists — issue #6).
+**The one-dispatch path (recommended):** fire the `deploy-worker` workflow
+(workflow_dispatch, input `repos` = the DSH_WORKER_REPOS list). It runs
+`scripts/install-worker.sh` ON a dsh box — the self-register-factory
+pattern — and installs everything below idempotently: credentials from the
+repo's `BOT_PAT` + `DOPPLER_SERVICE_TOKEN` secrets land ONLY in the 0600
+env file, and the cron line re-pins the toolkit to the moving `v1` tag
+every sweep, so the worker's code updates exclusively through
+drift-check's audited releases.
+
+The manual equivalent (what the installer automates; cron keepalive needs
+no sudo, `svc.sh`/systemd when sudo exists — issue #6):
 
 ```bash
 # 1. toolkit checkout (keep updated: git pull — or via the drift bump PR)
