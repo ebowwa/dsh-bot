@@ -232,6 +232,19 @@ fetch_context() {
     gh api "repos/${repo}/issues/${num}/comments?per_page=100" \
       --jq '.[-8:][] | "- " + .user.login + ": " + ((.body // "") | gsub("[\\r\\n]+"; " ") | .[0:280])' || true
   } > "$outdir/thread-context.txt" 2>/dev/null || true
+  # AGENT MESSAGES: structured dsh:msg comment blocks become a machine
+  # section — agent-to-agent communication over the thread (the schema:
+  # <!-- dsh:msg from:<id> to:<id|*> type:<kind> --> ... <!-- /dsh:msg -->).
+  gh api "repos/${repo}/issues/${num}/comments?per_page=100" --jq '
+    .[] | .body | scan("<!-- dsh:msg[^>]*-->[\\s\\S]*?<!-- /dsh:msg -->") // empty' 2>/dev/null \
+    | head -10 > "$outdir/agent-messages.txt" || true
+  if [ -s "$outdir/agent-messages.txt" ]; then
+    {
+      echo
+      echo "agent messages on this thread (structured dsh:msg blocks, newest last):"
+      cat "$outdir/agent-messages.txt"
+    } >> "$outdir/thread-context.txt"
+  fi
 }
 
 # trusted_task <repo> <num> <is_pr> <outfile> — the task source, in order:
@@ -303,6 +316,43 @@ run_item_bg() {
     trap 'rm -f "$ITEM_LOCK"' EXIT
     "$@"
   ) &
+}
+
+# dashboard_update — the fleet's live status board: ONE issue per repo
+# (marker <!-- dsh:dashboard --> in the body, label dsh/dashboard),
+# edited each sweep. Queue depth, in-flight runs with their run ids and
+# models, slot usage, the live census, recent completions — the answers
+# to "what is running right now" on a URL instead of in dispatch logs.
+# DSH_WORKER_DASHBOARD=0 disables.
+dashboard_update() { # <repo>
+  local repo="$1" num body q r inflight slots procs recent
+  [ "${DSH_WORKER_DASHBOARD:-1}" = "1" ] || return 0
+  num="$(gh issue list --repo "$repo" --state open --label dsh/dashboard --json number --jq '.[0].number' 2>/dev/null || true)"
+  if [ -z "$num" ]; then
+    num="$(gh issue create --repo "$repo" --title "dsh fleet dashboard" \
+      --body "<!-- dsh:dashboard -->\n(initializing…)" --label dsh/dashboard 2>/dev/null | grep -oE '[0-9]+$' || true)"
+    [ -n "$num" ] || return 0
+  fi
+  q="$(gh issue list --repo "$repo" --state open --label dsh/queued --json number --jq 'length' 2>/dev/null || echo '?')"
+  r="$(gh issue list --repo "$repo" --state open --label dsh/running --json number --jq 'length' 2>/dev/null || echo '?')"
+  slots="$(ls -1 "$ITEM_SLOTS" 2>/dev/null | wc -l | tr -d ' ')"
+  procs="$(pgrep -fc 'dsh --profile headless' 2>/dev/null || echo 0)"
+  inflight="$(for lk in "$ITEM_SLOTS"/*.lock; do [ -e "$lk" ] || continue; printf '%s ' "$(basename "$lk" .lock)"; done)"
+  recent="$(ls -1t "$DATA/runs" 2>/dev/null | head -5 | tr '\n' ' ')"
+  body="$(printf '<!-- dsh:dashboard -->
+**dsh fleet dashboard** — updated every sweep (~60s) by the worker.
+
+| | |
+|---|---|
+| queued | %s |
+| running | %s |
+| slots in use | %s / %s |
+| live dsh processes | %s |
+| in-flight items | %s |
+| recent runs | %s |
+| model lanes | fleet=%s map=%s |
+' "$q" "$r" "$slots" "$CONCURRENCY" "$procs" "${inflight:-none}" "${recent:-none}" "$MODEL" "${DSH_WORKER_MODEL_MAP:-none}")"
+  gh issue edit "$num" --repo "$repo" --body "$body" >/dev/null 2>&1 || true
 }
 
 # prune_runs — keep the newest KEEP_RUNS run dirs
@@ -677,6 +727,8 @@ sweep() {
     done < <(gh api --paginate "repos/${repo}/issues?state=open&labels=${TASK_LABEL}&per_page=100" \
       --jq '.[] | {number: (.number // 0), is_pr: ((.pull_request != null) // false)}' \
       || echo "worker: poll FAILED for $repo label '$TASK_LABEL' (gh error above, if any)" >&2)
+
+    dashboard_update "$repo"
   done
 }
 

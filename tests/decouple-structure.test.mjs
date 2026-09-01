@@ -310,3 +310,21 @@ test("bounded item concurrency: slots, background items, skip-not-fail when full
   // lock cleanup on exit
   assert.match(w, /trap 'rm -f "\$ITEM_LOCK"' EXIT/);
 });
+
+test("fleet dashboard: maintained issue per repo, edited each sweep, disable switch", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /dashboard_update\(\) \{ /);
+  assert.match(w, /<!-- dsh:dashboard -->/);
+  assert.match(w, /dsh\/dashboard/);
+  assert.match(w, /DSH_WORKER_DASHBOARD:-1/, "on by default");
+  assert.match(w, /dashboard_update "\$repo"/, "the sweep maintains it");
+  assert.match(w, /live dsh processes/, "census surfaces on the board");
+});
+
+test("agent message schema: structured dsh:msg blocks become a machine section", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /dsh:msg[^>]*-->/);
+  assert.match(w, /\/dsh:msg/);
+  assert.match(w, /agent-messages\.txt/);
+  assert.match(w, /agent messages on this thread/);
+});
