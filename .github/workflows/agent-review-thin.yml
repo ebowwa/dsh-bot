@@ -1,0 +1,54 @@
+# dsh-bot: agent-review-thin — the DECOUPLED review trigger as a REUSABLE
+# workflow. The runner-holding review stage is retired: this trigger is a
+# ~15s github-hosted job that enqueues the review (the dsh/review label on
+# the PR); the out-of-band worker (scripts/dsh-worker.sh) picks it up and
+# runs scripts/review-pr.sh — rules from the PR BASE, line-strict verdict,
+# labels per verdict, never auto-approves.
+#
+# The consumer keeps a thin shell (on: issue_comment /review with the trust
+# gate, and/or workflow_dispatch) that resolves the PR number and calls
+# this with `pr:` — see .github/workflows/dsh-review.yml in this repo for
+# the reference consumer, or examples/dsh-review.yml.
+#
+# Inputs:
+#   pr            required — the PR number to review
+#   review-label  queue label (default dsh/review — must equal the
+#                 worker's DSH_WORKER_REVIEW_LABEL)
+
+name: agent-review-thin
+
+on:
+  workflow_call:
+    inputs:
+      pr:
+        description: "PR number to enqueue for review"
+        type: string
+        required: true
+      review-label:
+        description: "Review queue label added to the PR (must equal the worker's DSH_WORKER_REVIEW_LABEL)"
+        type: string
+        default: "dsh/review"
+
+jobs:
+  dsh-review-thin-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Lane impact: none — github-hosted; NO self-hosted runner is held
+      # for the review (that was the legacy agent-review.yml path).
+      - name: Enqueue the review (the whole trigger)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_INPUT: ${{ inputs.pr }}
+          REVIEW_LABEL: ${{ inputs.review-label }}
+        run: |
+          set -euo pipefail
+          case "$PR_INPUT" in
+            ''|*[!0-9]*) echo "agent-review-thin: bad pr input '$PR_INPUT'" >&2; exit 2 ;;
+          esac
+          gh label create "$REVIEW_LABEL" --repo "$GITHUB_REPOSITORY" \
+            --force --color D93F0B --description "dsh review requested (decoupled worker)" >/dev/null 2>&1 || true
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_INPUT}/labels" \
+            -f labels[]="$REVIEW_LABEL" >/dev/null 2>&1 \
+            || { echo "agent-review-thin: enqueue failed (labels permission on the caller token?)" >&2; exit 1; }
+          echo "review enqueued on PR #${PR_INPUT} (${REVIEW_LABEL}) — the worker runs review-pr.sh; no runner is held"

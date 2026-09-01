@@ -23,6 +23,7 @@ Two execution modes:
 | File | Purpose |
 |---|---|
 | `.github/workflows/agent-comment-thin.yml` | DECOUPLED trigger: ack (dsh:ack marker) + enqueue (dsh/queued label); github-hosted, ~20s |
+| `.github/workflows/agent-review-thin.yml` | DECOUPLED review trigger: enqueue a review (dsh/review label) on any PR — github-hosted, ~15s; the worker runs the review (no runner held) |
 | `.github/workflows/agent-comment.yml` | LEGACY comment loop: context fetch → scrub → agent → ship → reply → review dispatch |
 | `.github/workflows/agent-review.yml` | LEGACY adversarial review stage (rules + gates + verdict + labels) |
 | `.github/workflows/agent-dispatch.yml` | LEGACY manual/scheduled task entry |

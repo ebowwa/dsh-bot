@@ -38,6 +38,7 @@ ubuntu-latest** and only acks + enqueues. No self-hosted `dsh` runners, no
 |---|---|
 | `dsh/queued` | added by the trigger; pending |
 | `dsh/running` | claimed — the worker DELETE-removed `queued` (a second worker racing the same item gets a 404 on the DELETE and skips it) |
+| `dsh/review` | a REVIEW-ONLY item — added by `agent-review-thin.yml` (a `/review` comment or `workflow_dispatch`); the worker claims it the same way and runs `review-pr.sh` on that PR. **The decoupled review stage: reviews of ANY PR run on the worker — no Actions job holds a runner for a review, ever.** |
 | (removed at completion) | `running` is removed; a fresher `queued` from a newer trigger comment stays queued for the next sweep |
 
 The queue list is read with the issues REST API (`gh api repos/R/issues?labels=...`)
@@ -102,6 +103,10 @@ blast radius:
   `ai-reviewed`/`changes-requested` ONLY from a line-strict verdict
   (`scripts/review-verdict.mjs`); an absent/unparseable verdict sets no
   labels and tells a human to look.
+- **Reviews are queue items too**: `/review` on a PR (or a
+  `workflow_dispatch`) enqueues `dsh/review` via `agent-review-thin.yml` —
+  a ~15s github-hosted job. The review itself always runs on the worker.
+  dsh-bot's own `dsh-review.yml` uses this path (dogfood).
 - **Scrubbing unchanged and fail-closed**: model-input scrubbing
   (`SECRETS_ONLY=1`) guards what reaches the provider; output scrubbing
   guards the reply/PR/review surfaces; a scrubber failure withholds output.

@@ -1,4 +1,8 @@
-# dsh-review shell for dsh-bot — thin consumer of the reusable review.
+# dsh-review shell for dsh-bot — DECOUPLED: enqueues the review; the
+# out-of-band worker (scripts/dsh-worker.sh, dsh/review label) runs
+# scripts/review-pr.sh. The legacy path (agent-review.yml on a held
+# [self-hosted, dsh] runner for up to 45 min per review) is retired for
+# THIS repo — dogfooding the decouple the repo ships.
 name: dsh review
 
 on:
@@ -19,7 +23,7 @@ permissions:
 concurrency:
   group: dsh-review-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
   # false is load-bearing: the tower re-fires reviews on unreviewed PRs
-  # every tick; cancel-in-progress would kill the running review.
+  # every tick; cancel-in-progress would kill a running (enqueued) review.
   cancel-in-progress: false
 
 jobs:
@@ -31,8 +35,9 @@ jobs:
           && github.event.comment.user.type != 'Bot'
           && contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
           && github.event.issue.pull_request)
-    uses: ebowwa/dsh-bot/.github/workflows/agent-review.yml@v1.14.0
+    uses: ebowwa/dsh-bot/.github/workflows/agent-review-thin.yml@main
     secrets: inherit
     with:
-      rules-file: "REVIEW.md"
-      pr: ${{ inputs.pr }}
+      # workflow_dispatch passes inputs.pr; the /review comment path
+      # resolves the PR number from the issue the comment belongs to.
+      pr: ${{ inputs.pr || github.event.issue.number }}
