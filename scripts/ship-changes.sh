@@ -147,10 +147,14 @@ done
 
 # .dsh-bot is the fetched toolkit checkout, NOT agent work (workflow mode);
 # the worker's clone contains no toolkit checkout at all, so the exclusion is
-# harmless there.
-DIRTY="$(git status --porcelain -- . ':!.dsh-bot' 2>/dev/null)"
-AHEAD="$(git log --oneline "$BEFORE_SHA..HEAD" 2>/dev/null | wc -l | tr -d ' ')"
-if [ -n "$DIRTY" ] || [ "$AHEAD" -gt 0 ] 2>/dev/null; then
+# harmless there. DIFF_OK tracks whether the git checks ACTUALLY ran — a
+# failing git must never yield a "verified: nothing to ship" note (review
+# round on PR #45: the unguarded substitutions collapsed failures to an
+# empty diff and the note overclaimed verification).
+DIFF_OK=1
+DIRTY="$(git status --porcelain -- . ':!.dsh-bot' 2>/dev/null)" || DIFF_OK=0
+AHEAD="$(git log --oneline "$BEFORE_SHA..HEAD" 2>/dev/null | wc -l | tr -d ' ')" || DIFF_OK=0
+if [ -n "$DIRTY" ] || [ "${AHEAD:-0}" -gt 0 ] 2>/dev/null; then
   BRANCH="dsh/auto-r${DSH_RUN_ID}a${DSH_RUN_ATTEMPT}"
   git checkout -B "$BRANCH" 2>/dev/null || git checkout -b "$BRANCH"
   if [ -n "$DIRTY" ]; then
@@ -176,8 +180,17 @@ if [ -n "$DIRTY" ] || [ "$AHEAD" -gt 0 ] 2>/dev/null; then
   fi
 fi
 
-echo "ship note: ${NOTE:-nothing to ship (verified: no repo-state changes, no local diff)}"
-# An empty NOTE used to leave a bare newline in the note file (the reply
-# step's `[ -s ]` guard then printed an empty "**Shipped:**"). Write the
-# verified message instead — same words the log carries.
-echo "${NOTE:-nothing to ship (verified: no repo-state changes, no local diff)}" > "$DSH_SHIP_NOTE_FILE"
+# The ship note: a REAL shipping NOTE always wins (the agent pushed /
+# PRs opened — never overwrite that with an UNVERIFIED message, review
+# round 2 on PR #50). When there is nothing real, only claim "verified"
+# if the git checks actually ran; a failing git yields UNVERIFIED.
+if [ -n "$NOTE" ]; then
+  echo "ship note: $NOTE"
+  echo "$NOTE" > "$DSH_SHIP_NOTE_FILE"
+elif [ "${DIFF_OK:-1}" != "1" ]; then
+  echo "ship note: nothing to ship — git checks could not run (UNVERIFIED)"
+  echo "nothing to ship — git checks could not run (UNVERIFIED)" > "$DSH_SHIP_NOTE_FILE"
+else
+  echo "ship note: nothing to ship (verified: no repo-state changes, no local diff)"
+  echo "nothing to ship (verified: no repo-state changes, no local diff)" > "$DSH_SHIP_NOTE_FILE"
+fi

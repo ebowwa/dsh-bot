@@ -68,6 +68,16 @@ if [ -z "$TASK" ]; then
   exit 2
 fi
 
+# The agent always launches via `doppler run --token "$DOPPLER_SERVICE_TOKEN"`
+# — there is no local-auth fallback. Under set -u an unset token died with a
+# bare "unbound variable" at the launch line (after installing dsh + probing
+# cell tools); make it a typed, early, cheap failure instead. This is a
+# REQUIRED env in every caller (CI secrets, dsh-worker's env file).
+if [ -z "${DOPPLER_SERVICE_TOKEN:-}" ]; then
+  echo "error: DOPPLER_SERVICE_TOKEN unset — the agent launches through \`doppler run --token\`; CI and the worker env file must provide it" >&2
+  exit 2
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 

@@ -49,6 +49,85 @@ test("worker review reads the rules from the PR BASE (a PR cannot grade itself)"
   assert.match(rp, /refusing to review without the rules contract/);
 });
 
+// Regression pins for the PR #45 review round — every blocking finding is
+// pinned structurally so a reintroduction goes red here.
+test("PR45 F1+F2: worker passes DSH_SHIP_REPO (required env guard) to reply AND review", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /DSH_SHIP_REPO="\$repo" DSH_SHIP_CACHE="\$rundir"[\s\S]*?post-reply\.sh/);
+  assert.match(w, /DSH_SHIP_REPO="\$repo" DSH_REVIEW_OUT[\s\S]*?review-pr\.sh/);
+});
+
+test("PR45 F3: fetch_context writes to its outdir argument, not \$1 (the repo)", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /local repo="\$1" num="\$2" outdir="\$3"/);
+  assert.match(w, /\$outdir\/thread-context\.txt/);
+  assert.ok(!/\$1\/thread-context\.txt/.test(w), "the redirect must never land on \$1 (the repo name) again");
+});
+
+test("PR50 r2 F3: the ctx directory is CREATED before fetch_context writes into it", () => {
+  const w = read("scripts/dsh-worker.sh");
+  // The round-2 finding: the redirect target existed but the dir never was
+  // created, so the write still failed under || true. The mkdir must
+  // include the ctx dir and precede the fetch_context call in the file.
+  const mkdirIdx = w.indexOf('mkdir -p "$rundir/tmp" "$rundir/ctx" "$work"');
+  const fetchIdx = w.indexOf('fetch_context "$repo" "$num" "$rundir/ctx"');
+  assert.ok(mkdirIdx !== -1, "ctx dir must be created in process_item");
+  assert.ok(fetchIdx !== -1, "fetch_context must target the run dir");
+  assert.ok(mkdirIdx < fetchIdx, "mkdir must run BEFORE fetch_context");
+});
+
+test("PR50 r2 F7: abort_item is pinned — it posts a thread note before releasing the label", () => {
+  const w = read("scripts/dsh-worker.sh");
+  assert.match(w, /abort_item\(\) \{/);
+  assert.match(w, /gh api "repos\/\$\{repo\}\/issues\/\$\{num\}\/comments"/); // posts on the thread
+  assert.match(w, /abort_item "\$repo" "\$num" "\$rundir" "checkout of the target ref"/);
+  assert.match(w, /abort_item "\$repo" "\$num" "\$rundir" "push-credential write/);
+});
+
+test("PR50 r2: worker shipper does NOT set a custom note filename (the reply must find the note)", () => {
+  const w = read("scripts/dsh-worker.sh");
+  // post-reply.sh reads $DSH_SHIP_CACHE/dsh-ship-note.txt; the worker's
+  // shipper call must use that default — a custom DSH_SHIP_NOTE_FILE
+  // silently dropped the Shipped note from the worker's reply. No
+  // ASSIGNMENT may exist (the explanatory comment may reference the name).
+  assert.ok(!/DSH_SHIP_NOTE_FILE="/.test(w), "no custom note filename assignment (reply reads the default path)");
+});
+
+test("PR50 r2: a real shipping NOTE always beats the UNVERIFIED branch (never overwritten)", () => {
+  const s = read("scripts/ship-changes.sh");
+  assert.match(s, /if \[ -n "\$NOTE" \]/);
+  // lastIndexOf UNVERIFIED = the real branch's message; the real-NOTE
+  // check must come before it in the file (comments may mention the word
+  // earlier — that is why lastIndexOf).
+  const noteIdx = s.indexOf('[ -n "$NOTE" ]');
+  const unverifiedIdx = s.lastIndexOf("UNVERIFIED");
+  assert.ok(noteIdx !== -1 && noteIdx < unverifiedIdx, "the real-note branch must be evaluated before UNVERIFIED");
+});
+
+test("PR45 F4: driver has a typed DOPPLER_SERVICE_TOKEN guard (required env)", () => {
+  const drv = read("scripts/run-dsh-agent.sh");
+  assert.match(drv, /DOPPLER_SERVICE_TOKEN unset/);
+  const ex = read("config/dsh-worker.env.example");
+  assert.match(ex, /DOPPLER_SERVICE_TOKEN=.*required/);
+});
+
+test("PR45 F5: shipper claims 'verified' only when the git checks ran", () => {
+  const s = read("scripts/ship-changes.sh");
+  assert.match(s, /DIFF_OK=1/);
+  assert.match(s, /UNVERIFIED/);
+});
+
+test("PR45 F6: trigger matcher equals gate+worker (contains @dsh-agent)", () => {
+  const thin = read(".github/workflows/agent-comment-thin.yml");
+  assert.match(thin, /\*@dsh-agent\*\)/);
+});
+
+test("PR45 F8: review-pr scrub failure is a real fail-closed exit 3 (no dead contract)", () => {
+  const rp = read("scripts/review-pr.sh");
+  assert.match(rp, /exit 3/);
+  assert.match(rp, /scrubber failed — review NOT posted/);
+});
+
 test("decoupled-mode docs exist and describe the queue + trust model", () => {
   assert.ok(existsSync(path.join(ROOT, "docs", "decoupled-worker.md")));
   const doc = read("docs/decoupled-worker.md");

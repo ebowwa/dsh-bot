@@ -30,8 +30,10 @@
 #   DSH_BOT_DIR         required — this toolkit's checkout (scripts/)
 #   DSH_WORKER_REPOS    required — space/comma-separated "owner/repo" list
 #                       of consumer repos to poll
-#   DOPPLER_SERVICE_TOKEN  optional — passed through to the driver and the
-#                       push-credential resolver (worker-side Doppler)
+#   DOPPLER_SERVICE_TOKEN  REQUIRED — the agent launches only via
+#                       `doppler run --token ...`; the driver exits 2
+#                       (typed) without it. Also used by the
+#                       push-credential resolver.
 #   DSH_WORKER_DATA_ROOT    run artifacts root (default $HOME/.dsh-worker)
 #   DSH_WORKER_MODEL        agent model (default zai/glm-5.3)
 #   DSH_WORKER_SUBAGENT_MODEL subagent children (default inherit head)
@@ -105,10 +107,12 @@ git_clone() { # <owner/repo> <dest>
     git clone --quiet --depth 1 "https://github.com/${1}.git" "$2"
 }
 
-# fetch_context <repo> <num> — thread context file (title/body + last 8
-# comments), same shape the CI flow builds.
+# fetch_context <repo> <num> <outdir> — thread context file (title/body +
+# last 8 comments), same shape the CI flow builds. Outdir is REQUIRED (the
+# review round caught the redirect landing on $1/repo instead of the run
+# dir — the agent was permanently context-blind).
 fetch_context() {
-  local repo="$1" num="$2"
+  local repo="$1" num="$2" outdir="$3"
   {
     gh issue view "$num" --repo "$repo" \
       --json title,body \
@@ -117,7 +121,7 @@ fetch_context() {
     echo "recent comments (last 8, truncated):"
     gh api "repos/${repo}/issues/${num}/comments?per_page=100" \
       --jq '.[-8:][] | "- " + .user.login + ": " + ((.body // "") | gsub("[\\r\\n]+"; " ") | .[0:280])' || true
-  } > "$1/thread-context.txt" 2>/dev/null || true
+  } > "$outdir/thread-context.txt" 2>/dev/null || true
 }
 
 # trusted_task <repo> <num> <is_pr> <outfile> — the last /dsh comment from a
@@ -156,6 +160,19 @@ prune_runs() {
   ls -1t "$DATA/runs" | tail -n +$((KEEP_RUNS + 1)) | while read -r d; do rm -rf "$DATA/runs/$d"; done
 }
 
+# abort_item <repo> <num> <rundir> <stage> — a claimed task that dies before
+# reaching the agent must NOT vanish silently: post a short note on the
+# thread (the review round called this out — post-claim aborts dropped the
+# task with zero UI), then release the run label and drop the run dir.
+abort_item() {
+  local repo="$1" num="$2" rundir="$3" stage="$4"
+  printf '**dsh agent** — this task failed in the worker before reaching the agent (stage: %s). Nothing was changed or shipped. Check the worker log and retry with a new `/dsh` comment.' "$stage" \
+    > "$rundir/aborted.md"
+  gh api "repos/${repo}/issues/${num}/comments" -f body=@"$rundir/aborted.md" >/dev/null 2>&1 || true
+  gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true
+  rm -rf "$rundir"
+}
+
 # process_item <repo> <num> <is_pr>
 process_item() {
   local repo="$1" num="$2" is_pr="$3" kind runid rundir work task raw body thread ackid rc
@@ -163,7 +180,10 @@ process_item() {
   runid="w$(date +%Y%m%d-%H%M%S)-$$"
   rundir="$DATA/runs/$runid"
   work="$rundir/repo"
-  mkdir -p "$rundir/tmp" "$work"
+  # ctx MUST exist before fetch_context redirects into it (review round 2 on
+  # PR #50: the F3 fix pointed the redirect at $rundir/ctx but nothing ever
+  # created the dir — still context-blind under || true).
+  mkdir -p "$rundir/tmp" "$rundir/ctx" "$work"
   export TMPDIR="$rundir/tmp"
   echo "==== worker [$runid] $repo #$num ($kind) ===="
 
@@ -214,12 +234,12 @@ process_item() {
         git -C "$work" fetch -q --depth 1 origin "refs/pull/${num}/merge"
       git -C "$work" checkout -q FETCH_HEAD
     fi
-  } || { echo "worker: checkout failed on $repo (token scope?) — aborting item" >&2; gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true; rm -rf "$rundir"; return 1; }
+  } || { echo "worker: checkout failed on $repo (token scope?) — aborting item" >&2; abort_item "$repo" "$num" "$rundir" "checkout of the target ref"; return 1; }
 
   # --- push credential into the clone (same resolver the CI flow uses) ----
   ( cd "$work" && PUSH_FALLBACK_CRED="$GH_TOKEN" DOPPLER_SERVICE_TOKEN="${DOPPLER_SERVICE_TOKEN:-}" \
       bash "$DSH_BOT_DIR/scripts/resolve-push-token.sh" ) \
-    || { echo "worker: push-credential write failed — aborting item" >&2; gh api -X DELETE "repos/${repo}/issues/${num}/labels/$(label_enc "$RUN_LABEL")" >/dev/null 2>&1 || true; rm -rf "$rundir"; return 1; }
+    || { echo "worker: push-credential write failed — aborting item" >&2; abort_item "$repo" "$num" "$rundir" "push-credential write (resolve-push-token.sh)"; return 1; }
 
   # --- before-state for the shipper ----------------------------------------
   git -C "$work" rev-parse HEAD > "$rundir/dsh-before-sha"
@@ -243,14 +263,21 @@ process_item() {
   echo "worker: agent exited $rc (non-zero is the agent/task failing, not the worker)"
 
   # --- ship (deterministic; shared script) ---------------------------------
+  # DSH_SHIP_NOTE_FILE is deliberately NOT set: the default
+  # ($DSH_SHIP_CACHE/dsh-ship-note.txt) is exactly what post-reply.sh reads
+  # — a custom filename here silently dropped the Shipped note from the
+  # worker's reply (review round 2 on PR #50).
   ( cd "$work" && ACK_COMMENT_ID="$ACK_ID" DSH_SHIP_REPO="$repo" DSH_RUN_ID="$runid" DSH_RUN_ATTEMPT=1 \
       DSH_WORKTREE="$work" DSH_SHIP_CACHE="$rundir" DSH_AGENT_OUTPUT="$rundir/agent-output.txt" \
-      DSH_SHIP_NOTE_FILE="$rundir/ship-note.txt" DSH_PR_NUM_FILE="$rundir/pr-num" REVIEW_WORKFLOW="" \
+      DSH_PR_NUM_FILE="$rundir/pr-num" REVIEW_WORKFLOW="" \
       DSH_TASK_TITLE="${TASK%%$'\n'*}" bash "$DSH_BOT_DIR/scripts/ship-changes.sh" ) \
     || echo "worker: shipper exited nonzero (see log — ship note may be incomplete)" >&2
 
   # --- reply (edits the trigger's ack comment in place when found) ---------
-  DSH_SHIP_CACHE="$rundir" DSH_AGENT_OUTPUT="$rundir/agent-output.txt" ACK_COMMENT_ID="$ACK_ID" \
+  # (DSH_SHIP_REPO is a REQUIRED env guard in post-reply.sh — without it
+  # every task died at the reply step; review round on PR #45.)
+  DSH_SHIP_REPO="$repo" DSH_SHIP_CACHE="$rundir" DSH_AGENT_OUTPUT="$rundir/agent-output.txt" \
+    ACK_COMMENT_ID="$ACK_ID" \
     TARGET_KIND="$kind" TARGET_NUM="$num" DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
     bash "$DSH_BOT_DIR/scripts/post-reply.sh" || echo "worker: reply step failed" >&2
 
@@ -258,7 +285,7 @@ process_item() {
   if [ -s "$rundir/pr-num" ]; then
     PR_NUM="$(cat "$rundir/pr-num")"
     echo "worker: reviewing shipped PR #$PR_NUM (model $REVIEW_MODEL)"
-    DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$REVIEW_MODEL" \
+    DSH_SHIP_REPO="$repo" DSH_REVIEW_OUT="$rundir/review-output.txt" DSH_REVIEW_MODEL="$REVIEW_MODEL" \
       DSH_REVIEW_RULES_FILE="$REVIEW_RULES_FILE" DSH_WORKTREE="$work" PR_NUM="$PR_NUM" \
       DSH_RUN_ID="$runid" DSH_RUNNER_NAME="$WORKER_NAME" \
       bash "$DSH_BOT_DIR/scripts/review-pr.sh" \
