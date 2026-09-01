@@ -60,6 +60,9 @@
 #                       warns once and runs without a hard cap
 #   DSH_WORKER_REVIEW_TIMEOUT_MIN  per-REVIEW cap (default 45, the legacy
 #                       agent-review workflow timeout) — same enforcement
+#   DSH_WORKER_ORIGIN_PREFIX clone origin prefix (default
+#                       https://github.com/ — a TEST SEAM; never set in
+#                       production)
 #   DSH_WORKER_CONCURRENCY  how many items may run CONCURRENTLY (default
 #                       3). Items are independent agent runs; the label
 #                       claim is atomic (one DELETE winner), so parallel
@@ -162,6 +165,58 @@ git_clone() { # <owner/repo> <dest>
     git -c credential.helper= clone --quiet --depth 1 "https://github.com/${1}.git" "$2"
 }
 
+# --- shared repo stores + worktrees (execution isolation) -----------------
+# Each served repo gets ONE bare mirror at $DATA/repos/<owner--repo>.git,
+# refreshed under a per-repo flock; every item then checks out via
+# `git worktree add` — a LOCAL checkout from the shared object store
+# instead of a full clone per agent (the tower's pack is ~126MB; at
+# concurrency 3 that was 3 clones per sweep). Pushes/fetches from the
+# worktree still reach GitHub (the mirror's origin), so shipping is
+# unchanged. Any failure falls back to the plain clone.
+ORIGIN_PREFIX="${DSH_WORKER_ORIGIN_PREFIX:-https://github.com/}"
+repo_store() { # <owner/repo> -> store path (created + refreshed under flock)
+  local repo="$1" store lock
+  store="$DATA/repos/$(printf '%s' "$repo" | tr '/' '--').git"
+  lock="$store.fetch.lock"
+  mkdir -p "$DATA/repos" 2>/dev/null || true
+  if [ ! -d "$store" ]; then
+    ( flock -n 9 || exit 1
+      [ -d "$store" ] || git clone --mirror --quiet "${ORIGIN_PREFIX}${repo}.git" "$store"
+    ) 9>"$lock" || return 1
+  fi
+  # bounded refresh: a stale store only costs old refs (items fetch what
+  # they need themselves); the lock serializes concurrent sweeps
+  ( flock -n 9 && git --git-dir="$store" fetch --prune --quiet origin ) 9>"$lock" 2>/dev/null || true
+  printf '%s' "$store"
+}
+
+WT_REF_OK=0
+git_wt() { # <owner/repo> <dest> [ref] — worktree AT the ref (default HEAD)
+  local repo="$1" dest="$2" ref="${3:-HEAD}" store
+  WT_REF_OK=0
+  store="$(repo_store "$repo")" || { git_clone "$repo" "$dest"; return $?; }
+  if git --git-dir="$store" worktree add --detach --quiet "$dest" "$ref" 2>/dev/null; then
+    WT_REF_OK=1
+    return 0
+  fi
+  # store present but the ref did not resolve (e.g. a fresh PR whose merge
+  # ref postdates the last refresh): refresh once, retry, then fall back
+  ( flock -n 9 && git --git-dir="$store" fetch --prune --quiet origin ) 9>"$store.fetch.lock" 2>/dev/null || true
+  if git --git-dir="$store" worktree add --detach --quiet "$dest" "$ref" 2>/dev/null; then
+    WT_REF_OK=1
+    return 0
+  fi
+  git_clone "$repo" "$dest"
+}
+
+wt_prune() { # stale worktree metadata (items rm -rf their dirs)
+  local store
+  for store in "$DATA"/repos/*.git; do
+    [ -d "$store" ] || continue
+    git --git-dir="$store" worktree prune 2>/dev/null || true
+  done
+}
+
 # fetch_context <repo> <num> <outdir> — thread context file (title/body +
 # last 8 comments), same shape the CI flow builds. Outdir is REQUIRED (the
 # review round caught the redirect landing on $1/repo instead of the run
@@ -254,6 +309,7 @@ run_item_bg() {
 prune_runs() {
   [ -d "$DATA/runs" ] || return 0
   ls -1t "$DATA/runs" | tail -n +$((KEEP_RUNS + 1)) | while read -r d; do rm -rf "$DATA/runs/$d"; done
+  wt_prune
 }
 
 # abort_item <repo> <num> <rundir> <stage> — a claimed task that dies before
@@ -291,14 +347,14 @@ review_item() {
     return 0
   fi
 
-  # fresh clone at the default branch; review-pr.sh fetches the PR merge
-  # ref + base ref itself and diffs base...merge inside it. ANY failure
-  # after claim notes the thread and leaves the label OFF — including
-  # clone failures (drift finding 2 on v1.46.0: silent drops). No
+  # worktree from the shared store at the default branch; review-pr.sh
+  # fetches the PR merge ref + base ref itself and diffs base...merge
+  # inside it. ANY failure after claim notes the thread and leaves the
+  # label OFF — including checkout failures (drift finding 2 on v1.46.0: silent drops). No
   # auto-requeue anywhere: an unconditional re-queue on a persistently
   # failing clone would post one comment per sweep, forever (self-caught
   # during this PR's review); a human re-fires /review instead.
-  git_clone "$repo" "$work" \
+  git_wt "$repo" "$work" "HEAD" \
     || { echo "worker: review checkout failed on $repo — noting the thread, no auto-requeue" >&2
          printf '**dsh review** — the worker could not clone the repo for this review (clone/egress failure). The review item was dropped (no auto-retry); re-run with `/review` to retry.' > "$rundir/clone-failed.md"
          gh api "repos/${repo}/issues/${num}/comments" -f body="$(cat $rundir/clone-failed.md)" >/dev/null 2>&1 || true
@@ -383,8 +439,15 @@ task_item() {
   # model resolution: the task's explicit model > the repo map > fleet default
   ITEM_MODEL="${t_model:-$(model_for "$repo")}"
 
-  # checkout: default branch, or the requested ref when valid
-  git_clone "$repo" "$work" \
+  # checkout: default branch (worktree from the shared store), or the
+  # requested ref when present in the store
+  if [ -n "$t_base" ]; then
+    git_wt "$repo" "$work" "refs/heads/$t_base" || git_wt "$repo" "$work" "HEAD"
+  else
+    git_wt "$repo" "$work" "HEAD"
+  fi
+  rc_wt=$?
+  [ "$rc_wt" -eq 0 ] \
     || { echo "worker: task checkout failed on $repo — noting the thread, no auto-retry" >&2
          gh api "repos/${repo}/issues/${num}/comments" -f body="**dsh worker** — the checkout for this dispatched task failed (clone/egress); the task was dropped. Re-dispatch to retry." >/dev/null 2>&1 || true
          gh issue close "$num" --repo "$repo" >/dev/null 2>&1 || true
@@ -485,12 +548,16 @@ process_item() {
 
   # --- checkout the target ref (PR merge ref for PR comments) -------------
   {
-    git_clone "$repo" "$work"
     if [ "$kind" = "pr" ]; then
-      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
-        GIT_CONFIG_VALUE_0="$(git_auth_header)" \
-        git -C "$work" -c credential.helper= fetch -q --depth 1 origin "refs/pull/${num}/merge"
-      git -C "$work" checkout -q FETCH_HEAD
+      git_wt "$repo" "$work" "refs/pull/${num}/merge"
+      if [ "$WT_REF_OK" != "1" ]; then
+        GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader \
+          GIT_CONFIG_VALUE_0="$(git_auth_header)" \
+          git -C "$work" -c credential.helper= fetch -q --depth 1 origin "refs/pull/${num}/merge"
+        git -C "$work" checkout -q FETCH_HEAD
+      fi
+    else
+      git_wt "$repo" "$work" "HEAD"
     fi
   } || { echo "worker: checkout failed on $repo (token scope?) — aborting item" >&2; abort_item "$repo" "$num" "$rundir" "checkout of the target ref"; return 1; }
 
