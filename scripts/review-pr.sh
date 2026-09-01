@@ -125,9 +125,16 @@ that actually construct what they claim), workflow discipline, and honesty
 claim; an unreproducible claim is a finding. Do NOT push commits, do NOT
 open PRs, do NOT comment on the PR — your final answer is posted for you.
 
-End your final answer with a line that IS exactly one of:
+CONTRACT (violating it discards your review): your final answer MUST END
+WITH, as its very last line, exactly one of these two lines — nothing
+after it, no prose, no sign-off:
 ## Verdict: APPROVE
 ## Verdict: REQUEST CHANGES
+A report without that final line is a contract violation: the harness
+parses no verdict, sets no labels, and forces human review — your entire
+review then carries no machine weight. "## Required to merge" sections or
+blocking findings in prose do NOT count; ONLY the literal Verdict line
+does.
 EOF
 
 # 4. Run the reviewer (off the same driver; the worktree is at the PR merge
