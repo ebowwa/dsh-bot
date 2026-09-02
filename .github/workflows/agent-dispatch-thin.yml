@@ -67,7 +67,7 @@ on:
 
 jobs:
   dsh-dispatch-thin-trigger:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dsh]
     timeout-minutes: 5
     steps:
       # Lane impact: none — github-hosted; NO self-hosted runner is held

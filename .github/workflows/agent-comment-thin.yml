@@ -40,7 +40,7 @@ on:
 
 jobs:
   dsh-agent-thin-trigger:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, dsh]
     timeout-minutes: 10
     steps:
       # Lane impact: none — github-hosted; no self-hosted runner is held.
