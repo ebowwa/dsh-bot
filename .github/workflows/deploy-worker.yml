@@ -1,4 +1,4 @@
-# deploy-worker — ONE-DISPATCH install of the out-of-band worker on a
+# deploy-worker — ONE-DISPATCH install (re-index: workflow registration went stale — GitHub cached a pre-dispatch version of this file) of the out-of-band worker on a
 # factory box (the self-register-factory pattern: workflows may install
 # persistent per-user services on self-hosted runners; cron keepalive
 # needs no sudo — issue #6's systemd path remains the upgrade when sudo
