@@ -4,8 +4,9 @@
 # The decouple: the comment-triggered loop no longer executes the agent
 # inside the Actions job that holds a self-hosted runner for up to 120
 # minutes. Instead:
-#   - a thin ~20s trigger (agent-comment-thin.yml, github-hosted
-#     ubuntu-latest) posts the ack comment and adds the queue label;
+#   - a thin ~20s trigger (agent-comment-thin.yml, self-hosted `dsh`
+#     lane — owner directive: nothing on github-hosted) posts the ack
+#     comment and adds the queue label;
 #   - THIS worker, running as an always-on process on the factory pool
 #     boxes (cron keepalive or systemd — see docs/decoupled-worker.md),
 #     polls the queue, claims items, runs the headless agent, ships, and

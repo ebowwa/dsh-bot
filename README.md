@@ -9,10 +9,11 @@ stage, deterministic shipper, and enforced output/input scrubbing — as
 Two execution modes:
 
 - **Decoupled (recommended)** — `agent-comment-thin.yml` + `scripts/dsh-worker.sh`.
-  The trigger is a ~20s github-hosted job (ack + enqueue via the `dsh/queued`
-  label); the agent, shipper, reply, and adversarial review run out-of-band
+  The trigger is a ~20s job on the self-hosted `dsh` lane (owner directive:
+  nothing on github-hosted; ack + enqueue via the `dsh/queued` label); the
+  agent, shipper, reply, and adversarial review run out-of-band
   on the always-on worker (factory pool boxes). Consumers need **no
-  self-hosted runners and no extra secrets**. See `docs/decoupled-worker.md`.
+  extra secrets**. See `docs/decoupled-worker.md`.
 - **Legacy execution** — the old mode: the agent runs inside the Actions
   job that holds a `dsh` self-hosted runner for up to 120 min
   (`agent-comment.yml`, `agent-dispatch.yml`). Kept for the migration
@@ -22,9 +23,9 @@ Two execution modes:
 
 | File | Purpose |
 |---|---|
-| `.github/workflows/agent-comment-thin.yml` | DECOUPLED trigger: ack (dsh:ack marker) + enqueue (dsh/queued label); github-hosted, ~20s |
-| `.github/workflows/agent-review-thin.yml` | DECOUPLED review trigger: enqueue a review (dsh/review label) on any PR — github-hosted, ~15s; the worker runs the review (no runner held) |
-| `.github/workflows/agent-dispatch-thin.yml` | DECOUPLED task trigger: creates a task issue (dsh/task label, options in a marker block) — legacy input surface kept for programmatic callers; the worker runs the task (no runner held) |
+| `.github/workflows/agent-comment-thin.yml` | DECOUPLED trigger: ack (dsh:ack marker) + enqueue (dsh/queued label); self-hosted `dsh` lane, ~20s |
+| `.github/workflows/agent-review-thin.yml` | DECOUPLED review trigger: enqueue a review (dsh/review label) on any PR — self-hosted `dsh` lane, ~15s; the worker runs the review |
+| `.github/workflows/agent-dispatch-thin.yml` | DECOUPLED task trigger: creates a task issue (dsh/task label, options in a marker block) — legacy input surface kept for programmatic callers; the worker runs the task |
 | `.github/workflows/agent-comment.yml` | LEGACY comment loop: context fetch → scrub → agent → ship → reply → review dispatch |
 | `.github/workflows/agent-review.yml` | LEGACY adversarial review stage (rules + gates + verdict + labels) |
 | `.github/workflows/agent-dispatch.yml` | LEGACY manual/scheduled task entry |

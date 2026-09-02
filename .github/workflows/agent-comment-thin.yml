@@ -1,11 +1,10 @@
 # dsh-bot: agent-comment-thin — the DECOUPLED comment trigger as a REUSABLE
-# workflow. THE trigger of the future: a ~20s github-hosted (ubuntu-latest)
-# job that does exactly two things — post the ack comment (with the
-# dsh:ack marker the worker matches) and enqueue the task (the queue label).
-# Everything heavy (agent run, shipping, reply, adversarial review) happens
-# out-of-band in scripts/dsh-worker.sh on the worker box — nothing here
-# holds a self-hosted runner, and the consumer needs NO self-hosted dsh
-# runners, NO DOPPLER_SERVICE_TOKEN, NO DSH_BOT_REPO_TOKEN.
+# workflow. A ~20s job on the self-hosted dsh lane (owner directive: nothing
+# on github-hosted) that does exactly two things — post the ack comment (with
+# the dsh:ack marker the worker matches) and enqueue the task (the queue
+# label). Everything heavy (agent run, shipping, reply, adversarial review)
+# happens out-of-band in scripts/dsh-worker.sh on the worker box, and the
+# consumer needs NO DOPPLER_SERVICE_TOKEN, NO DSH_BOT_REPO_TOKEN.
 #
 # Consumer shells call this with `uses:`; their local file is a ~15-line
 # event shell (on:, the trust gate, secrets: inherit) — see
@@ -43,7 +42,8 @@ jobs:
     runs-on: [self-hosted, dsh]
     timeout-minutes: 10
     steps:
-      # Lane impact: none — github-hosted; no self-hosted runner is held.
+      # Lane impact: ~20s on the self-hosted dsh lane (owner directive:
+      # nothing on github-hosted).
       - name: Ack + enqueue (the whole trigger)
         env:
           GH_TOKEN: ${{ github.token }}

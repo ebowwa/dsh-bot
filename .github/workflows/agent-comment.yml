@@ -3,10 +3,11 @@
 #
 # NOTE: consumers should adopt the DECOUPLED mode instead —
 # examples/dsh-agent-thin.yml calls agent-comment-thin.yml, a ~20s
-# ubuntu-latest trigger that acks + enqueues; the out-of-band worker
+# trigger on the self-hosted dsh lane (owner directive: nothing on
+# github-hosted) that acks + enqueues; the out-of-band worker
 # (scripts/dsh-worker.sh, running on the factory pool boxes) runs the agent,
-# ships, replies, and reviews — no self-hosted dsh runners, no
-# DOPPLER_SERVICE_TOKEN/DSH_BOT_REPO_TOKEN in the consumer.
+# ships, replies, and reviews — no DOPPLER_SERVICE_TOKEN/DSH_BOT_REPO_TOKEN
+# in the consumer.
 #
 # This workflow remains for the migration window: it executes the agent
 # INSIDE the Actions job that holds the runner for up to timeout-minutes.
