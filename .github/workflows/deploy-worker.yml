@@ -105,3 +105,4 @@ jobs:
           echo "running one real sweep in-job (claims + completes any queued item; steady-state is the keepalive's job)"
           set -a; . "$HOME/.dsh-worker/env"; set +a
           bash "$DSH_BOT_DIR/scripts/dsh-worker.sh" --once 2>&1 | node scripts/scrub-output.mjs
+# (reparse nudge — the dispatch API served a stale trigger registration after rapid merges)
