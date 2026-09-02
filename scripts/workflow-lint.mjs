@@ -99,6 +99,21 @@ const netBrackets = (s) => {
 /** GitHub's documented step keys (union of run-steps and uses-steps).
  * A sequence-item map directly under 'steps:' may carry these and only
  * these; anything else fails the whole file at GitHub's parser. */
+// A colon-space inside an UNQUOTED step/job name splits the plain scalar
+// into a mapping ("mapping values are not allowed in this context") —
+// GitHub then creates ZERO jobs for every dispatch while indentation-only
+// lints stay green. Live: the 2026-09-02 deploy outage (a step named
+// "... (the perimeter rule: every deploy ...)"), caught by actionlint,
+// missed here; a rename (PR #80) treated the symptom (stale registration)
+// and carried the defect into worker-deploy.yml.
+function colonInPlainName(raw) {
+  const m = /^([ \t]*)- name: (.+)$/.exec(raw) || /^([ \t]*)name: (.+)$/.exec(raw);
+  if (!m) return null;
+  const value = m[2].trim();
+  if (value.startsWith('"') || value.startsWith("'")) return null;
+  return /: /.test(value) ? value : null;
+}
+
 const STEP_KEYS = new Set([
   "id", "name", "if", "uses", "run", "shell", "working-directory",
   "env", "with", "continue-on-error", "timeout-minutes",
@@ -309,6 +324,10 @@ export function lintWorkflow(text, name = "workflow") {
         stack.push({ indent: entry.item.contentColumn, kind: "map", line: no, stepItem: entry.parentKey === "steps" });
         if (entry.parentKey === "steps" && !STEP_KEYS.has(k)) {
           err(no, stepKeyError(k));
+        }
+        if (entry.parentKey === "steps" && k === "name") {
+          const badName = colonInPlainName(raw);
+          if (badName) err(no, `step name contains ': ' in a plain scalar — quote it or drop the colon (GitHub fails the file's jobs): ${JSON.stringify(badName.slice(0, 60))}`);
         }
         pendingKey = { indent: entry.item.contentColumn, hasValue: v !== null && v !== "", key: k };
         if (v !== null && /^[|>]/.test(v.trim())) scalar = { keyIndent: entry.item.contentColumn, base: null, line: no };
