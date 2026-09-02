@@ -61,6 +61,12 @@ jobs:
           set -euo pipefail
           bash scripts/install-worker.sh
 
+      - name: Local fleet audit (the perimeter rule: every deploy logs the box's local plane)
+        run: |
+          set -uo pipefail
+          bash scripts/local-fleet-audit.sh 2>&1 | tee "$RUNNER_TEMP/local-audit.log"
+          echo "(a finding here is a question — is it sanctioned? — not a failure)"
+
       - name: Box diagnostics (keepalive viability)
         run: |
           set -uo pipefail
