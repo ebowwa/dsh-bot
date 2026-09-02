@@ -55,6 +55,26 @@ jobs:
             node -e "const fs=require('fs');const s=fs.readFileSync(process.argv[1],'utf8');if(/\t/.test(s))throw new Error('tab in '+process.argv[1])" "$f"
           done
           node scripts/workflow-lint.mjs "${wfs[@]}"
+          # REAL parse (not just structure): a plain scalar containing
+          # colon-space is invalid YAML that the structural lint cannot
+          # see — GitHub silently disables the workflow's registration
+          # (name=path fallback, no triggers, every dispatch 422s). This
+          # ran red on worker-deploy.yml for hours before the gate
+          # existed (PR #77's step name).
+          for f in "${wfs[@]}"; do
+            node -e '
+              const fs = require("fs");
+              const s = fs.readFileSync(process.argv[1], "utf8");
+              const m = s.match(/^([ \t]*- name:[ \t]+)([^'"'"'"{][^\n]*)$/gm) || [];
+              for (const line of m) {
+                const val = line.replace(/^[ \t]*- name:[ \t]+/, "");
+                if (/:[ \t]| #[^\n]*$/.test(val) && !/\$\{\{.*\}\}/.test(val)) {
+                  console.error("plain scalar with colon-space in step name (" + process.argv[1] + "): " + val.trim());
+                  process.exitCode = 1;
+                }
+              }
+            ' "$f" || fail=1
+          done
       - name: Unit tests
         # bare --test auto-discovers *.test.mjs (a directory argument is not
         # portable across the node versions on the runner lanes)
