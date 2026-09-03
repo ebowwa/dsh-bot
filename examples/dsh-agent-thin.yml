@@ -1,8 +1,9 @@
 # Consumer shell (DECOUPLED mode) — .github/workflows/dsh-agent-thin.yml in
-# YOUR repo. The WHOLE consumer side: a ~20s github-hosted trigger that
-# acks + enqueues. No self-hosted runners, no DOPPLER_SERVICE_TOKEN, no
-# DSH_BOT_REPO_TOKEN. The out-of-band worker (ebowwa's factory pool,
-# scripts/dsh-worker.sh) runs the agent, ships, replies, and reviews.
+# YOUR repo. The WHOLE consumer side: a ~20s trigger (self-hosted `dsh`
+# lane — owner directive: nothing on github-hosted) that acks + enqueues.
+# No DOPPLER_SERVICE_TOKEN, no DSH_BOT_REPO_TOKEN. The out-of-band worker
+# (ebowwa's factory pool, scripts/dsh-worker.sh) runs the agent, ships,
+# replies, and reviews.
 #
 # Watch the workflow run log for the "queued" confirmation; the ack comment
 # on the thread is edited by the worker with the final answer + ship note.

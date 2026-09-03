@@ -1,11 +1,12 @@
 # dsh-bot: agent-dispatch-thin — the DECOUPLED manual/scheduled task entry
 # as a REUSABLE workflow. The runner-holding path (agent-dispatch.yml on
 # [self-hosted, dsh] for up to 120 min per task) is retired for consumers
-# that adopt this: the trigger is a ~15s github-hosted job that CREATES A
+# that adopt this: the trigger is a ~15s job on the self-hosted dsh lane
+# (owner directive: nothing on github-hosted) that CREATES A
 # TASK ISSUE carrying the task and its options (model, subagent model,
 # base ref) in a structured HTML-marker block, labels it dsh/task, and
 # exits. The out-of-band worker (scripts/dsh-worker.sh) claims the label
-# and runs the agent — no self-hosted runner is held anywhere.
+# and runs the agent — nothing rides github-hosted.
 #
 # Input surface: IDENTICAL to legacy agent-dispatch.yml so programmatic
 # callers (the tower's executor sends task/model/subagent_model
@@ -70,8 +71,9 @@ jobs:
     runs-on: [self-hosted, dsh]
     timeout-minutes: 5
     steps:
-      # Lane impact: none — github-hosted; NO self-hosted runner is held
-      # for the task (that was the legacy agent-dispatch.yml path).
+      # Lane impact: ~15s on the self-hosted dsh lane (owner directive:
+      # nothing on github-hosted); the task itself runs on the worker
+      # (the legacy agent-dispatch.yml path is retired).
       - name: Create the task issue (the whole trigger)
         env:
           GH_TOKEN: ${{ github.token }}

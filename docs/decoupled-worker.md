@@ -2,7 +2,8 @@
 
 The comment-triggered agent loop no longer needs to execute inside the
 Actions job that holds a self-hosted runner for up to 120 minutes. In
-decoupled mode the **trigger** is a ~20-second github-hosted job and the
+decoupled mode the **trigger** is a ~20-second job on the self-hosted
+`dsh` lane (owner directive: nothing on github-hosted) and the
 **agent actually runs on an always-on worker process** on the factory pool
 boxes. Consumers keep only a ~15-line shell; the worker runs the headless
 agent, ships, replies, and reviews.
@@ -28,9 +29,10 @@ consumer repo                          factory box (always-on)
 One file, `.github/workflows/dsh-agent-thin.yml` — copy
 `examples/dsh-agent-thin.yml`. It keeps the existing trust gate
 (author-association + not-a-bot) and calls the reusable
-`agent-comment-thin.yml` trigger, which runs on **github-hosted
-ubuntu-latest** and only acks + enqueues. No self-hosted `dsh` runners, no
-`DOPPLER_SERVICE_TOKEN`, no `DSH_BOT_REPO_TOKEN` are required anymore.
+`agent-comment-thin.yml` trigger, which runs on the **self-hosted `dsh`
+lane** (owner directive: nothing on github-hosted) and only acks +
+enqueues. No `DOPPLER_SERVICE_TOKEN`, no `DSH_BOT_REPO_TOKEN` are required
+anymore.
 
 ## Queue semantics (labels, no new infra)
 
@@ -115,7 +117,8 @@ blast radius:
   labels and tells a human to look.
 - **Reviews are queue items too**: `/review` on a PR (or a
   `workflow_dispatch`) enqueues `dsh/review` via `agent-review-thin.yml` —
-  a ~15s github-hosted job. The review itself always runs on the worker.
+  a ~15s job on the self-hosted `dsh` lane. The review itself always runs
+  on the worker.
   dsh-bot's own `dsh-review.yml` uses this path (dogfood).
 - **Scrubbing unchanged and fail-closed**: model-input scrubbing
   (`SECRETS_ONLY=1`) guards what reaches the provider; output scrubbing

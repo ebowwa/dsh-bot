@@ -12,6 +12,17 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const read = p => readFileSync(path.join(ROOT, p), "utf8");
 
+// Owner directive (PR #83): NOTHING rides github-hosted — the thin triggers
+// hold a self-hosted dsh lane for their ~15-20s instead. Pin both directions:
+// the lane must be declared, and ubuntu-latest must be gone (a revert to
+// github-hosted goes red here). This is the pin that the PR #83 merge left
+// stale (gates run 33596434482): three tests still asserted ubuntu-latest
+// after the workflows moved.
+const assertSelfHostedThin = (wf, name) => {
+  assert.match(wf, /runs-on: \[self-hosted, dsh\]/, `${name}: must run on the self-hosted dsh lane`);
+  assert.ok(!wf.includes("ubuntu-latest"), `${name}: nothing on github-hosted (owner directive, PR #83)`);
+};
+
 test("legacy comment workflow calls the shared shipper + reply scripts (not inline copies)", () => {
   const wf = read(".github/workflows/agent-comment.yml");
   assert.match(wf, /ship-changes\.sh/);
@@ -20,9 +31,9 @@ test("legacy comment workflow calls the shared shipper + reply scripts (not inli
   assert.ok(!wf.includes("dsh/auto-r${GITHUB_RUN_ID}"));
 });
 
-test("thin trigger: github-hosted, acks with the marker, enqueues with the label", () => {
+test("thin trigger: self-hosted dsh lane, acks with the marker, enqueues with the label", () => {
   const thin = read(".github/workflows/agent-comment-thin.yml");
-  assert.match(thin, /runs-on: ubuntu-latest/);
+  assertSelfHostedThin(thin, "agent-comment-thin.yml");
   assert.match(thin, /dsh:ack/);
   assert.match(thin, /dsh\/queued/);
   assert.match(thin, /labels\[\]/);
@@ -152,7 +163,7 @@ test("review queue: dsh-review.yml is THIN — enqueues, never holds a runner", 
   assert.ok(!shell.includes("agent-review.yml@"), "the runner-holding legacy review must not be dispatched by this repo's own shell");
   assert.match(shell, /agent-review-thin\.yml/);
   const thin = read(".github/workflows/agent-review-thin.yml");
-  assert.match(thin, /runs-on: ubuntu-latest/);
+  assertSelfHostedThin(thin, "agent-review-thin.yml");
   assert.match(thin, /dsh\/review/);
   assert.match(thin, /labels\[\]/);
 });
@@ -239,7 +250,7 @@ test("task queue: dispatched tasks run on the worker (the last runner-holding pa
 
 test("task queue: the thin dispatch trigger exists with the legacy input surface", () => {
   const t = read(".github/workflows/agent-dispatch-thin.yml");
-  assert.match(t, /runs-on: ubuntu-latest/);
+  assertSelfHostedThin(t, "agent-dispatch-thin.yml");
   for (const input of ["task:", "base-ref:", "runner:", "model:", "subagent-model:", "timeout-minutes:", "review-workflow:", "dsh-bot-ref:"]) {
     assert.ok(t.includes(input), "input surface kept: " + input);
   }

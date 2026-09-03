@@ -1,6 +1,7 @@
 # dsh-bot: agent-review-thin — the DECOUPLED review trigger as a REUSABLE
 # workflow. The runner-holding review stage is retired: this trigger is a
-# ~15s github-hosted job that enqueues the review (the dsh/review label on
+# ~15s job on the self-hosted dsh lane (owner directive: nothing on
+# github-hosted) that enqueues the review (the dsh/review label on
 # the PR); the out-of-band worker (scripts/dsh-worker.sh) picks it up and
 # runs scripts/review-pr.sh — rules from the PR BASE, line-strict verdict,
 # labels per verdict, never auto-approves.
@@ -34,8 +35,9 @@ jobs:
     runs-on: [self-hosted, dsh]
     timeout-minutes: 5
     steps:
-      # Lane impact: none — github-hosted; NO self-hosted runner is held
-      # for the review (that was the legacy agent-review.yml path).
+      # Lane impact: ~15s on the self-hosted dsh lane (owner directive:
+      # nothing on github-hosted); the review itself runs out-of-band on
+      # the worker (the legacy agent-review.yml path is retired).
       - name: Enqueue the review (the whole trigger)
         env:
           GH_TOKEN: ${{ github.token }}
