@@ -813,3 +813,123 @@ test("the stamped web overlay boots: the insert-listed provider tree loads (skip
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- 3. the doppler launch must be isolated from the HOST's doppler state --
+
+// mac-mini-ane, 2026-08-28 (ANE review runs 33281316457 and every dispatch
+// after, all red in ~20s with workflow, driver and secret untouched): a
+// user-level `doppler setup` on the shared cell wrote a scope into
+// $HOME/.doppler/.doppler.yaml (project seed/prd at $HOME). `doppler run
+// --token T` resolves project/config as flags > DOPPLER_PROJECT /
+// DOPPLER_CONFIG env > $HOME scope entries > the token's own binding, so
+// every CI launch requested project 'seed' with the consumer repo's
+// ane-scoped token, the API rejected it ("This token does not have access
+// to requested project 'seed'"), doppler fell back to a fallback file that
+// did not exist either, and `doppler run` exited 1 before `dsh` ever
+// started. The launch must give the doppler PROCESS a pristine HOME and
+// cleared DOPPLER_* env (so the token's own binding wins) while the CHILD
+// still gets the real HOME (dsh/git/gh state must survive).
+
+test("doppler launch is isolated from the host doppler scope; the child still gets the real HOME", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "dsh-scope-iso-"));
+  const bin = path.join(dir, "bin");
+  const home = path.join(dir, "home"); // the HOST home the job runs under
+  const runnerTemp = path.join(dir, "runner");
+  mkdirSync(bin);
+  mkdirSync(home);
+  mkdirSync(runnerTemp);
+  // A hostile HOST scope, exactly like the mac-mini-ane cell: a user-level
+  // $HOME/.doppler/.doppler.yaml pinning a project this repo's token does
+  // not belong to. Inert coordinates — no secrets in the fixture.
+  mkdirSync(path.join(home, ".doppler"));
+  writeFileSync(
+    path.join(home, ".doppler", ".doppler.yaml"),
+    "scoped:\n    /:\n        enclave.project: hostscope-project\n        enclave.config: prd\n",
+  );
+
+  // doppler stub: RECORD the env + argv it was launched with, then exec the
+  // child chain (same exec shape as the other tests' stubs).
+  writeFileSync(
+    path.join(bin, "doppler"),
+    [
+      "#!/bin/sh",
+      'env > "$DOPPLER_ENV_SNAPSHOT"',
+      'printf \'%s\\n\' "$@" > "$DOPPLER_ARGS_SNAPSHOT"',
+      "shift; shift; shift; shift",
+      'exec "$@"',
+    ].join("\n") + "\n",
+  );
+  // dsh stub: answers --version, then records the env IT sees and succeeds.
+  // Called twice (--version during setup, the launch later) — the LAST
+  // snapshot is the launch, which is the one under test.
+  writeFileSync(
+    path.join(bin, "dsh"),
+    [
+      "#!/bin/sh",
+      'case "$1" in --version) echo "dsh-stub-0.0.0" >&2; exit 0;; esac',
+      'env > "$DSH_ENV_SNAPSHOT"',
+      "echo STUB-FINAL-ANSWER",
+      "exit 0",
+    ].join("\n") + "\n",
+  );
+  writeFileSync(path.join(bin, "zstd"), "#!/bin/sh\nexit 0\n");
+  writeFileSync(path.join(bin, "gh"), "#!/bin/sh\nexit 0\n");
+  for (const f of readdirSync(bin)) spawnSync("chmod", ["+x", path.join(bin, f)]);
+
+  const env = {
+    ...process.env,
+    PATH: `${bin}:${process.env.PATH}`,
+    HOME: home,
+    RUNNER_TEMP: runnerTemp,
+    DOPPLER_SERVICE_TOKEN: "stub-token",
+    // ambient host env of the same hijack class: env beats the token's own
+    // binding, so the launch must clear it for the doppler process.
+    DOPPLER_PROJECT: "ambient-poison-project",
+    DOPPLER_ENV_SNAPSHOT: path.join(dir, "doppler.env"),
+    DOPPLER_ARGS_SNAPSHOT: path.join(dir, "doppler.args"),
+    DSH_ENV_SNAPSHOT: path.join(dir, "dsh.env"),
+    GH_BIN: path.join(bin, "gh"),
+    DOPPLER_BIN: path.join(bin, "doppler"),
+    CELL_PROBE_DIRS: "",
+  };
+  delete env.GH_TOKEN;      // skip the gh-identity block entirely
+  delete env.GITHUB_ENV;    // no workflow env file to publish to
+  delete env.DSH_HOME;      // force the job-scoped home under RUNNER_TEMP
+  delete env.DSH_PERSISTENT_HOME;
+  delete env.DSH_SESSION_PATH_FILE;
+
+  const proc = spawnSync(
+    "bash",
+    [SCRIPT, "integration test task"],
+    { encoding: "utf8", env, timeout: 60_000 },
+  );
+  assert.equal(proc.status, 0, `driver must succeed, stderr: ${proc.stderr}`);
+
+  const parse = (s) =>
+    Object.fromEntries(
+      s.trimEnd().split("\n").map((l) => [l.slice(0, l.indexOf("=")), l.slice(l.indexOf("=") + 1)]),
+    );
+  const dEnv = parse(readFileSync(path.join(dir, "doppler.env"), "utf8"));
+  const cEnv = parse(readFileSync(path.join(dir, "dsh.env"), "utf8"));
+
+  // 1. doppler ran with a PRISTINE HOME — the host scope file was invisible.
+  assert.ok(dEnv.HOME && dEnv.HOME !== home,
+    "doppler must not see the host HOME — its .doppler scope would hijack the project binding");
+  assert.ok(!existsSync(path.join(dEnv.HOME, ".doppler")),
+    "doppler's HOME must be a pristine dir with no inherited .doppler state");
+  // 2. no ambient DOPPLER_* reached doppler (env overrides the token's scope).
+  assert.equal(dEnv.DOPPLER_PROJECT, undefined, "DOPPLER_PROJECT must be cleared for doppler");
+  assert.equal(dEnv.DOPPLER_CONFIG, undefined, "DOPPLER_CONFIG must be cleared for doppler");
+  // 3. the child got the REAL home back, and never the doppler token.
+  assert.equal(cEnv.HOME, home, "the child (dsh) must get the real HOME back");
+  assert.equal(cEnv.DOPPLER_SERVICE_TOKEN, undefined, "the doppler token must never reach the agent");
+  assert.equal(cEnv.DOPPLER_PROJECT, undefined, "no ambient DOPPLER_PROJECT may reach the agent");
+  // 4. the launch shape survived the re-plumbing.
+  const dargs = readFileSync(path.join(dir, "doppler.args"), "utf8");
+  assert.match(dargs, /--profile/, "the headless profile flag must survive");
+  assert.match(dargs, /integration test task/, "the task must survive");
+  // 5. the isolation home is cleaned up with the other launch artifacts.
+  assert.ok(!existsSync(dEnv.HOME), "the pristine doppler home must be removed after the run");
+
+  rmSync(dir, { recursive: true, force: true });
+});
